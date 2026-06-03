@@ -1,7 +1,7 @@
 ---
-title: "Audio Module: Playback, Music, and Volume"
+title: "Audio API: Playback, Music Streaming, and Volume"
 sidebarTitle: "Audio API"
-description: "setup_audio creates the miniaudio-backed AudioEngine. play_sound plays one-shot effects, play_music streams background tracks, and set_volume controls per-channel levels."
+description: "setup_audio wires the miniaudio AudioEngine. play_sound plays one-shot SFX, play_music streams a track, and set_volume adjusts master, SFX, and music gain."
 ---
 
 Keel's audio system is backed by [miniaudio](https://github.com/irmen/pyminiaudio) — a single stereo playback device running at 44.1 kHz / signed-16-bit. Sound effects are decoded once into a cache and mixed in a background thread; music is streamed file-by-file. The public API is a handful of module-level functions that delegate to an `AudioEngine` world resource.

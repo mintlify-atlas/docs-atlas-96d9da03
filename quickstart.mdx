@@ -1,7 +1,7 @@
 ---
-title: "Quickstart: Build Your First Keel Game"
+title: "Keel Quickstart: Your First Sprite and Physics Game"
 sidebarTitle: "Quickstart"
-description: "Get a Keel game running in minutes. Spawn a sprite, move it with WASD, add physics, and enable developer tools — all from scratch with no asset files needed."
+description: "Get a Keel game running in minutes. Spawn a sprite, move it with WASD, add 2D physics, and enable the dev tools overlay — no asset files needed."
 ---
 
 This guide takes you from a fresh Python environment to a running Keel game in five steps. You will build a movable sprite, add a bouncing physics ball, and turn on the built-in developer tools — all without creating any image or audio files. Every example on this page is a complete, runnable program.
@@ -223,24 +223,24 @@ This guide takes you from a fresh Python environment to a running Keel game in f
     Deep dive into archetypes, queries, the command buffer, events, and resource injection. Learn when to use `query`, `query_one`, `get`, and `set`.
   </Card>
   <Card
-    title="2D Rendering"
-    icon="image"
-    href="/rendering/renderer-2d"
+    title="App & Loop"
+    icon="rotate"
+    href="/concepts/app-and-loop"
   >
-    Sprite batching, texture atlases, the orthographic camera, tilemaps, and text rendering with `TextLabel` and the built-in font.
+    How the fixed-timestep loop works, phase execution order, the `FIXED_DT` constant, and `App` properties — everything that drives your game each frame.
   </Card>
   <Card
-    title="Physics (2D)"
-    icon="atom"
-    href="/physics/physics-2d"
+    title="Systems & Phases"
+    icon="layer-group"
+    href="/concepts/systems-and-phases"
   >
-    Body types, shape types, collision events, raycasts, and the common patterns for balls, paddles, bullets, and players.
+    Phase ordering from `PRE_UPDATE` through `POST_RENDER`, `after` dependencies for intra-phase ordering, and resource injection into system parameters.
   </Card>
   <Card
-    title="CLI & Tooling"
-    icon="terminal"
-    href="/tooling/cli"
+    title="Events"
+    icon="bolt"
+    href="/concepts/events"
   >
-    `keel new`, `keel run`, `keel build`, the world inspector, frame profiler, and debug draw — everything that ships with Keel out of the box.
+    Define custom events with `@keel.event`, emit and read them within a frame, and use the built-in `KeyEvent`, `CollisionEvent2D`, and more.
   </Card>
 </CardGroup>

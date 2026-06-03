@@ -1,7 +1,7 @@
 ---
-title: "Renderer Module: 2D and 3D Setup Functions"
+title: "Renderer API: 2D Sprite and 3D Mesh Setup Functions"
 sidebarTitle: "Renderer"
-description: "setup_renderer_2d and setup_renderer_3d register render systems and return setup objects. The 2D renderer provides a sprite batcher; the 3D renderer provides mesh and material registries."
+description: "setup_renderer_2d and setup_renderer_3d wire render systems and return setup objects with texture atlas, mesh registry, material registry, and cameras."
 ---
 
 Keel ships two independent renderers — a 2D sprite batcher and a 3D PBR-lite mesh renderer — both built on ModernGL. You call a single `setup_*` function; the renderer wires its own `Phase.RENDER` system and returns a setup object with the registries you need to load assets.

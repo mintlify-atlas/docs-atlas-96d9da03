@@ -1,7 +1,7 @@
 ---
-title: "Assets Module: Registry, Hot Reload, and Scenes"
+title: "Assets API: Registry, Hot Reload, and Scene Saves"
 sidebarTitle: "Assets API"
-description: "AssetRegistry loads files with handle-based access and extension-dispatched loaders. Hot reload re-uploads assets on change. Scene saves and loads world state as versioned JSON."
+description: "AssetRegistry loads assets by handle with extension-dispatched loaders. FileWatcher hot-reloads on PRE_UPDATE. Scene serializes world state as JSON."
 ---
 
 Keel's asset pipeline is built around three orthogonal concerns: loading (the `AssetRegistry`), watching for changes (the `FileWatcher`), and serializing world state (the `Scene` facade). All three are optional — `setup_assets` wires them together in one call, or you can use them independently.

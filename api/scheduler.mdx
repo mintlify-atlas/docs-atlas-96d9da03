@@ -1,7 +1,7 @@
 ---
-title: "Scheduler — Phase-Ordered System Runner"
+title: "Scheduler — Phase-Ordered System Runner in Keel"
 sidebarTitle: "Scheduler"
-description: "The Scheduler runs systems in phase order each tick, injects typed resources, and supports within-phase ordering via the after parameter. Access via app.scheduler or world.scheduler."
+description: "Scheduler runs systems in phase order, injects typed resources, and supports within-phase ordering via after=. Access via app.scheduler or world.scheduler."
 ---
 
 The `Scheduler` owns all registered system functions and invokes them in `Phase` order every tick. `App` and `World` share a single `Scheduler` instance — systems registered through either `@app.system(...)` or `@world.system(...)` land in the same registry and run in the same order. You rarely construct a `Scheduler` directly; access the shared one through `app.scheduler` or `world.scheduler`.
@@ -267,11 +267,12 @@ def update_camera(world, dt): ...
 @app.system(keel.Phase.RENDER)
 def render_scene(
     world, dt,
-    renderer: keel.Renderer3DSetup,
-    cam: keel.Camera3D,
+    renderer: keel.Renderer3D,
 ):
-    # Both resources injected automatically
-    ...
+    # Renderer3D is a world resource injected automatically.
+    # Camera3D is an ECS component — read it with world.query(keel.Camera3D).
+    viewport_w, viewport_h = app.window.get_size()
+    renderer.render(world, viewport_w, viewport_h)
 ```
 
 **Inspecting registered systems:**

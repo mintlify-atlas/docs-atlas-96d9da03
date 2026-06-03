@@ -1,7 +1,7 @@
 ---
-title: "Text Module: Font Loading and Label Management"
+title: "Text API: Font Loading and TextLabel Content API"
 sidebarTitle: "Text API"
-description: "setup_text registers the text render system. load_font bakes a glyph atlas. Use set_text, get_text, clear_text, and set_label_visible to manage TextLabel content."
+description: "setup_text registers the text render system. load_font bakes a glyph atlas. Manage content with set_text, get_text, clear_text, and set_label_visible."
 ---
 
 Keel's text system renders screen-space labels using freetype-py to bake glyph atlases into R8 GPU textures. Text is always drawn in **UI space** — it is not camera-transformed and does not scroll with the world. The system runs at `Phase.POST_RENDER`, after the 2D and 3D passes, so text always renders on top.

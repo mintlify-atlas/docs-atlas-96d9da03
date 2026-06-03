@@ -1,7 +1,7 @@
 ---
 title: "Physics Components: RigidBody, Collider, and Enums"
 sidebarTitle: "Physics"
-description: "RigidBody2D and Collider2D configure 2D pymunk physics. RigidBody3D and Collider3D configure 3D pybullet physics. BodyType and ShapeType enums control behavior."
+description: "RigidBody2D and Collider2D attach 2D pymunk physics. RigidBody3D and Collider3D attach 3D pybullet physics. BodyType and ShapeType control simulation mode."
 ---
 
 Keel's physics components are pure ECS data — they carry no pymunk or pybullet objects themselves. The `Physics2D` and `Physics3D` bridges read these fields on every `Phase.POST_UPDATE` tick, create or update the underlying simulation objects, advance the solver, and write results back into `Transform2D` / `Transform3D`. You describe what you want; the bridge makes it happen.
@@ -328,7 +328,7 @@ Emitted by `Physics3D` every tick that two pybullet bodies report a contact poin
 <ParamField path="normal_z" type="float">Z component of the contact normal.</ParamField>
 
 ```python
-@app.system(keel.Phase.UPDATE)
+@app.system(keel.Phase.POST_UPDATE)
 def on_hit(world, dt):
     for event in world.read_events(keel.CollisionEvent2D):
         print(f"Entity {event.entity_a} hit entity {event.entity_b}, impulse={event.impulse:.1f}")

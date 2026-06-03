@@ -1,7 +1,7 @@
 ---
-title: "2D Rendering with Sprites and Texture Atlas"
+title: "2D Rendering: Sprites, Atlas, and Instanced Batching"
 sidebarTitle: "2D Renderer"
-description: "Keel's 2D renderer uses an instanced sprite batcher with a 16-unit texture atlas. Call setup_renderer_2d(app) to register the render system, then spawn Sprite entities."
+description: "Keel's 2D renderer groups sprites by texture ID (up to 16 atlas slots) and issues one draw call per group. Call setup_renderer_2d(app) to activate."
 ---
 
 Keel's 2D renderer is built around a single instanced draw call per texture group. You register it once with `setup_renderer_2d(app)`, spawn entities that carry both a `Transform2D` and a `Sprite` component, and the renderer handles everything else — uploading per-instance data to the GPU, grouping sprites by `texture_id`, and issuing one `glDrawArraysInstanced` call per group each frame.

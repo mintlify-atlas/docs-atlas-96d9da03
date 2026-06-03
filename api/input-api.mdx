@@ -1,7 +1,7 @@
 ---
-title: "Input Module: InputState, Gamepad, and Key Constants"
+title: "Input API: InputState, Gamepad, and Key Constants"
 sidebarTitle: "Input API"
-description: "InputState provides held-state and edge-detected keyboard and mouse polling. GamepadState polls up to 4 gamepads. Key and button constants are re-exported from GLFW."
+description: "InputState provides held-state and edge-detected keyboard and mouse polling. GamepadState polls up to 4 gamepads. GLFW KEY_* constants are under keel.*."
 ---
 
 Keel exposes two complementary input surfaces: a stateful polling API (`InputState`, `GamepadState`) and an event-bus API (`KeyEvent`, `MouseButtonEvent`, etc.). The polling API is best for continuous input like movement; the event bus is best for one-shot actions like jump or shoot. Both update on the same GLFW callbacks wired by `App.__init__`.

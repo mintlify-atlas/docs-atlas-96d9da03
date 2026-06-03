@@ -1,7 +1,7 @@
 ---
-title: "Typed Event Bus in Keel"
+title: "Keel Typed Event Bus: Per-Frame Game Event Queues"
 sidebarTitle: "Events"
-description: "Keel's typed event bus lets systems emit and read strongly-typed events each frame. All event queues are cleared at the start of every tick."
+description: "Keel's typed event bus decouples systems with strongly-typed per-frame event queues. Events are cleared once per visual frame, before GLFW polls for input."
 ---
 
 Keel's event bus gives systems a structured, decoupled way to communicate within a frame. One system emits an event by type; any other system — running later in the same frame — reads events of that type. Because the bus is typed, there is no string-keyed dispatch, no casting, and no shared mutable state between the emitter and the reader.
@@ -192,6 +192,12 @@ class ScoredEvent:
     team: int
     points: int
 
+# --- Tag component to identify ball entities ---
+
+@keel.component
+class BallTag:
+    dummy: int = 0  # at least one numpy field required
+
 # --- Singleton game state ---
 
 @keel.component
@@ -206,7 +212,7 @@ app.world.flush()
 
 @app.system(keel.Phase.UPDATE)
 def check_goals(world, dt):
-    for ball_transform, in world.query(keel.Transform2D, BallTag):
+    for ball_transform, _ball in world.query(keel.Transform2D, BallTag):
         bx = ball_transform['x'][0]
         if bx < 0:
             world.emit(ScoredEvent(team=2, points=1))

@@ -1,7 +1,7 @@
 ---
-title: "Install Keel — Python Game Engine Setup Guide"
+title: "Installing Keel — Python Game Engine Setup Guide"
 sidebarTitle: "Installation"
-description: "Install Keel from PyPI using pip. Choose optional extras for 3D physics (pybullet) and developer tooling (ImGui). Requires Python 3.11+ and OpenGL 3.3."
+description: "Install Keel from PyPI using pip. Choose optional extras for 3D physics (pybullet) and developer tooling (ImGui). Requires Python 3.10+ and OpenGL 3.3."
 ---
 
 Keel is distributed on PyPI under the name **`keelpy`**. The import name inside your code is `keel`. This distinction — PyPI name vs. import name — is the single most common source of confusion for new users, so keep it in mind as you work through this page. The rest of the install is a standard `pip` one-liner.
@@ -10,7 +10,7 @@ Keel is distributed on PyPI under the name **`keelpy`**. The import name inside 
 
 Before installing, make sure your environment meets both requirements:
 
-- **Python 3.11 or newer** — Keel uses modern type annotation syntax and relies on features introduced in 3.11.
+- **Python 3.10 or newer** — Keel supports Python 3.10, 3.11, and 3.12. Pre-built wheels are available on PyPI for all three versions on Windows, macOS, and Linux.
 - **OpenGL 3.3 Core** — a GPU and driver that support OpenGL 3.3 Core Profile. This covers any discrete GPU from the last decade and most integrated graphics from Intel (Haswell, 2013+), AMD, and Apple Silicon via MoltenVK. Headless CI typically needs a software renderer such as Mesa's `llvmpipe`.
 
 <Steps>

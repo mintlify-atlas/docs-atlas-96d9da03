@@ -1,7 +1,7 @@
 ---
-title: "Systems, Phases, and Resource Injection"
+title: "Keel Systems and Phases: Register and Order Game Logic"
 sidebarTitle: "Systems & Phases"
-description: "Keel systems are plain Python functions registered to a Phase. The Scheduler runs them in phase order each tick, injecting typed resources into extra parameters automatically."
+description: "Keel systems are plain Python functions registered to a Phase. The Scheduler runs them in phase order each tick, injecting typed resources automatically."
 ---
 
 Systems are where game logic lives in Keel. A system is a plain Python function with a fixed two-parameter prefix — `(world, dt)` — followed by any number of optional typed parameters that the scheduler resolves automatically from the world's resource registry. There is no base class to inherit, no interface to implement, and no decorator magic beyond the registration call itself.
@@ -267,8 +267,8 @@ def move_player(world, dt, input: InputState):
 @app.system(keel.Phase.POST_UPDATE)
 def tick_dash(world, dt):
     for dash, in world.query(Dash):
-        dash['duration'] = (dash['duration'] - dt).clip(0)
-        dash['cooldown'] = (dash['cooldown'] - dt).clip(0)
+        dash['duration'][:] = (dash['duration'] - dt).clip(0)
+        dash['cooldown'][:] = (dash['cooldown'] - dt).clip(0)
 
 app.run()
 ```

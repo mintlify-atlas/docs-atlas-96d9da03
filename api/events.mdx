@@ -1,7 +1,7 @@
 ---
-title: "Events — Typed Event Bus Reference"
+title: "Events — Keel's Typed Per-Frame Event Bus Reference"
 sidebarTitle: "Events"
-description: "Keel's typed event bus emits and reads strongly-typed events within a frame. All queues clear at frame start. Built-in events cover input, collisions, and window resize."
+description: "Keel's typed per-frame event bus: emit with world.emit(), read with world.read_events(). Queues clear each frame. Covers input, physics, and custom events."
 ---
 
 Keel uses a typed, per-frame event bus to communicate between systems without tight coupling. Any `@keel.event`-decorated class becomes an event type. Instances are queued with `world.emit()` and iterated with `world.read_events()`. All queues are cleared automatically at the start of every visual frame, so events emitted in tick N are readable by later systems in tick N but gone by tick N+1.
@@ -296,7 +296,7 @@ Emitted by `Physics2D` when two collidable shapes make contact during a physics 
 </ParamField>
 
 ```python
-@app.system(keel.Phase.POST_UPDATE, after=physics_step)
+@app.system(keel.Phase.POST_UPDATE)
 def on_collision_2d(world, dt):
     for evt in world.read_events(keel.CollisionEvent2D):
         if world.has_component(evt.entity_a, Bullet):
@@ -376,7 +376,7 @@ class ItemPickedUp:
 **Step 2 — Emit from a collision handler:**
 
 ```python
-@app.system(keel.Phase.POST_UPDATE, after=physics_step)
+@app.system(keel.Phase.POST_UPDATE)
 def pickup_items(world, dt):
     for evt in world.read_events(keel.CollisionEvent2D):
         a, b = evt.entity_a, evt.entity_b

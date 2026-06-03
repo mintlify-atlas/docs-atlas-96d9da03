@@ -1,7 +1,7 @@
 ---
-title: "Asset Registry, Hot Reload, and Scene Persistence"
+title: "Keel Assets: Registry, Hot Reload, and Scene Files"
 sidebarTitle: "Assets"
-description: "Keel's AssetRegistry loads images and JSON with handle-based access. Watchdog-powered hot reload re-uploads textures on file change. Scenes save and load as versioned JSON."
+description: "AssetRegistry caches files by stable handle. FileWatcher reloads textures and JSON on the main thread. Scene saves world state as atomic versioned JSON."
 ---
 
 Keel's asset pipeline has three layers: a central `AssetRegistry` that caches loaded assets behind stable integer handles, a watchdog-powered `FileWatcher` that queues file changes on a background thread and drains them safely on the main thread, and a `Scene` facade that serializes and restores entire world states as atomic JSON files. None of these layers own simulation state — they slot in and out via world resources and `PRE_UPDATE` systems without touching the ECS core.

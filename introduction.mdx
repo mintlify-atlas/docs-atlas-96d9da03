@@ -1,7 +1,7 @@
 ---
-title: "Keel: A Python Game Engine Built on Archetype ECS"
+title: "Keel — Data-Oriented Python Game Engine Overview"
 sidebarTitle: "Introduction"
-description: "Keel is a Python game engine combining archetype ECS, ModernGL 2D/3D rendering, pymunk/pybullet physics, and miniaudio — structured game development without leaving Python."
+description: "Keel is a Python game engine with archetype ECS, ModernGL rendering, pymunk/pybullet physics, and miniaudio. Build structured games without leaving Python."
 ---
 
 Keel is a Python game engine whose tagline is *"the backbone of your game."* It gives you a real archetype-based Entity Component System at the core, a ModernGL renderer for both 2D sprites and 3D meshes, physics bridges to pymunk and pybullet, audio via miniaudio, and a CLI with hot-reloading — all in plain Python. The tradeoff is honest: Python has interpreter overhead, so Keel pushes hot paths into numpy and C extensions (ModernGL, pymunk, pybullet) and exposes the rest as clean Python APIs you can read, debug, and extend without leaving your editor.
@@ -23,39 +23,39 @@ Keel is for developers who want to stay in Python and write structured game code
     Struct-of-arrays storage with one numpy structured array per component type per archetype. Query DSL, typed event bus, deferred command buffer, and resource injection — all composable.
   </Card>
   <Card
-    title="2D Rendering"
-    icon="image"
-    href="/rendering/renderer-2d"
+    title="Systems & Phases"
+    icon="layer-group"
+    href="/concepts/systems-and-phases"
   >
-    Instanced sprite batcher with one draw call per texture group, a 16-unit texture atlas, orthographic camera with translation/rotation/zoom, and chunked tilemap support.
+    Six execution phases from `PRE_UPDATE` through `POST_RENDER`, with topological ordering within each phase and automatic resource injection into extra parameters.
   </Card>
   <Card
-    title="3D Rendering"
-    icon="cube"
-    href="/rendering/renderer-3d"
+    title="Events"
+    icon="bolt"
+    href="/concepts/events"
   >
-    OBJ loader, PBR-lite materials, directional light plus up to 8 point lights, sphere-based frustum culling, Transform3D hierarchy, and built-in cube/plane/UV sphere primitives.
+    Typed event bus with `@keel.event` classes, per-frame queues cleared at the start of each visual frame, and built-in events for input, physics, and window resize.
   </Card>
   <Card
-    title="Physics"
-    icon="atom"
-    href="/physics/physics-2d"
+    title="App & Loop"
+    icon="rotate"
+    href="/concepts/app-and-loop"
   >
-    2D bridge to pymunk (rigid bodies, shapes, collision events, raycasts) and optional 3D bridge to pybullet. Both bridges run at `Phase.POST_UPDATE` with the ECS as the source of truth.
+    Fixed-timestep loop at 60 Hz simulation, render once per visual frame. `App` wires together the `World`, `Scheduler`, `Window`, and `InputState` in one call.
   </Card>
   <Card
-    title="Audio"
-    icon="volume-high"
-    href="/systems/audio"
+    title="Quickstart"
+    icon="bolt-lightning"
+    href="/quickstart"
   >
-    miniaudio-backed `AudioEngine` with one-shot sound effects, streaming music tracks, per-channel volume control, fade in/out, and an `AudioSource` component for entity-bound sounds.
+    From zero to a running game in five steps: spawn a sprite, move it with WASD, add a bouncing physics ball, and enable the built-in developer tools.
   </Card>
   <Card
-    title="Dev Tooling"
+    title="Installation"
     icon="wrench"
-    href="/tooling/cli"
+    href="/installation"
   >
-    ImGui world inspector (F1), per-system frame profiler overlay (F2), physics debug draw (F3), hot-reloading CLI (`keel run`), and project scaffolding (`keel new`).
+    Install from PyPI (`pip install keelpy`), choose optional extras for 3D physics and ImGui dev tools, and verify the setup in one import.
   </Card>
 </CardGroup>
 
@@ -64,7 +64,7 @@ Keel is for developers who want to stay in Python and write structured game code
 `App` is the single top-level object. It owns:
 
 - **`World`** — the ECS database: archetypes, component storage, event queues, resources, and the command buffer.
-- **`Scheduler`** — a phase-ordered system runner that drives `PRE_UPDATE → UPDATE → POST_UPDATE → RENDER → POST_RENDER` each tick.
+- **`Scheduler`** — a phase-ordered system runner that drives `PRE_UPDATE → UPDATE → POST_UPDATE → PRE_RENDER → RENDER → POST_RENDER` each tick.
 - **`Window`** — a GLFW window plus a shared ModernGL context exposed as `app.ctx`.
 - **`InputState`** — held-state and edge-detected helpers for keyboard, mouse, and gamepad, updated once per simulation tick.
 
@@ -72,10 +72,10 @@ The fixed-timestep loop runs at **60 Hz** simulation. Rendering happens once per
 
 Every layer communicates with the next through public ECS APIs only, so adding or replacing a layer does not require changes to the others.
 
-```
+```text
 App
 ├── World  (archetypes · event bus · resources · command buffer)
-├── Scheduler  (PRE_UPDATE → UPDATE → POST_UPDATE → RENDER → POST_RENDER)
+├── Scheduler  (PRE_UPDATE → UPDATE → POST_UPDATE → PRE_RENDER → RENDER → POST_RENDER)
 ├── Window  (GLFW + ModernGL context)
 └── InputState  (keyboard · mouse · gamepad)
 ```
@@ -86,7 +86,7 @@ App
 
 ## Deferred Structural Changes
 
-Calling `world.spawn`, `world.despawn`, `world.add_component`, or `world.remove_component` queues a command in an internal buffer. Nothing moves between archetypes until `world.flush()` runs, which the main loop calls at the end of every frame. This keeps query iteration stable for the entire frame — you can spawn entities from inside a system without invalidating the views you are currently iterating.
+Calling `world.spawn`, `world.despawn`, `world.add_component`, or `world.remove_component` queues a command in an internal buffer. Nothing moves between archetypes until `world.flush()` runs. The main loop calls `world.flush()` after every simulation tick (after `POST_UPDATE` completes), so changes become visible to the next simulation tick within the same visual frame. This keeps query iteration stable for the duration of each tick — you can spawn entities from inside a system without invalidating the views you are currently iterating.
 
 ## License
 

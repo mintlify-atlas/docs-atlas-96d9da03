@@ -1,7 +1,7 @@
 ---
-title: "Hot Reload: Instant Feedback on File Save"
+title: "Hot Reload in Keel: Process Restart and Asset Watcher"
 sidebarTitle: "Hot Reload"
-description: "Keel's hot reload has two layers: keel run restarts the Python process on .py changes, and the asset watcher re-uploads textures and JSON data on the main thread without restarting."
+description: "Keel has two hot-reload layers: keel run restarts on .py changes; the asset watcher reloads textures and JSON in PRE_UPDATE without restarting the process."
 ---
 
 Keel provides two distinct hot-reload layers that work at different scopes and speeds. The first layer — process hot reload — is driven by the `keel run` CLI command and restarts the entire Python process when a `.py` file changes. The second layer — asset hot reload — is built into the `setup_assets` function and re-uploads changed textures and JSON files on the main thread while the game continues running. Understanding which layer handles which kind of change helps you structure a fast iteration loop.

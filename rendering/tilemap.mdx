@@ -1,7 +1,7 @@
 ---
-title: "Tilemap Rendering with Chunked Baking"
+title: "Tilemap Rendering: Chunk-Baked Static Tile Layers for 2D"
 sidebarTitle: "Tilemap"
-description: "Keel's tilemap renderer bakes tile data into vertex buffers per chunk. Use setup_tilemap(app, tile_data) to register the tilemap and update tiles at runtime."
+description: "Keel bakes 16x16-tile chunks into static VAOs. Call setup_tilemap(app, tile_data) after setup_renderer_2d; one draw call per non-empty chunk each frame."
 ---
 
 Keel's tilemap renderer is a static, chunk-baked layer that sits beneath the sprite pipeline. Instead of evaluating tile data every frame, it pre-bakes each 16×16 tile chunk into its own VAO and instance buffer at load time. The per-frame cost is one draw call per non-empty chunk, regardless of how many tiles that chunk contains.

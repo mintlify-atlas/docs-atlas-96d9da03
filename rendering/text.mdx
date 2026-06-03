@@ -1,7 +1,7 @@
 ---
 title: "Text Rendering with Freetype and Screen-Space Layout"
 sidebarTitle: "Text"
-description: "Keel renders text in screen space using freetype-py. Load fonts with load_font, spawn TextLabel entities, and update content with set_text — y=0 is the top of the screen."
+description: "Keel renders screen-space text using freetype-py. Call setup_text(app), load fonts via load_font, spawn TextLabel entities, and set content with set_text."
 ---
 
 Keel's text system renders glyphs in screen space using freetype-py. Each font is baked into a single R8 texture atlas at load time (using a shelf-packing algorithm), so the per-frame cost is only one draw call per unique `(font, colour)` pair. Text does not move with the 2D or 3D camera — it lives in UI space and is always drawn on top of the game world.
@@ -40,15 +40,15 @@ The call is idempotent — a second call returns the existing setup.
 ### load_font
 
 ```python
-font = load_font(app, path_or_builtin, size_px=24, name=None)
+font = load_font(app, path, size_px=24, name=None)
 ```
 
-Loads the font file at `path_or_builtin`, sets the pixel size, bakes a glyph atlas, and returns a `Font` object. Subsequent calls with the same `(path, size_px)` pair return the cached `Font` without re-uploading.
+Loads the font file at `path`, sets the pixel size, bakes a glyph atlas, and returns a `Font` object. Subsequent calls with the same `(path, size_px)` pair return the cached `Font` without re-uploading.
 
 | Parameter | Description |
 |---|---|
 | `app` | The `App` instance (used to access the GL context and `FontRegistry`). |
-| `path_or_builtin` | Absolute or relative path to a TTF/OTF file, or `keel.BUILTIN_FONT`. |
+| `path` | Absolute or relative path to a TTF/OTF file, or `keel.BUILTIN_FONT`. |
 | `size_px` | Pixel height of the rendered glyphs. Larger values use more atlas space. |
 | `name` | Optional string alias for later lookup via `font_registry.get(name)`. |
 

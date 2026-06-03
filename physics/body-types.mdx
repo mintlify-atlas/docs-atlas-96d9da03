@@ -1,7 +1,7 @@
 ---
 title: "Physics Body Types: Dynamic, Static, and Kinematic"
 sidebarTitle: "Body Types"
-description: "Keel physics uses three body types: DYNAMIC for colliding entities, STATIC for immovable geometry, and KINEMATIC for manually-moved entities. Choosing wrong is the top Keel bug."
+description: "Keel's DYNAMIC, STATIC, and KINEMATIC body types govern simulation, movement, and collision events in both the pymunk 2D and pybullet 3D bridges."
 ---
 
 Every physics entity in Keel has a `body_type` that governs how the physics bridge treats it each frame. Choosing the wrong body type is the single most common Keel bug — it produces a collision that physically occurs but emits no `CollisionEvent2D` or `CollisionEvent3D`, leaving the gameplay system deaf to an impact it expected to see. Reading this page first saves hours of debugging later.
@@ -75,7 +75,7 @@ This is the complete truth table for which body-type pairs emit `CollisionEvent2
 | DYNAMIC | DYNAMIC | ✅ Yes |
 | DYNAMIC | STATIC | ✅ Yes |
 | DYNAMIC | KINEMATIC | ✅ Yes |
-| DYNAMIC | Sensor (`sensor=True`) | ✅ Yes (sensor contact, `impulse=0`) |
+| DYNAMIC | Sensor (`sensor=True`, 2D only) | ✅ Yes (sensor contact, `impulse=0`) |
 | KINEMATIC | KINEMATIC | ❌ No |
 | KINEMATIC | STATIC | ❌ No |
 | STATIC | STATIC | ❌ No |

@@ -1,7 +1,7 @@
 ---
-title: "Archetype ECS: Keel's Data Model"
+title: "Keel Archetype ECS: Components, Queries, and Storage"
 sidebarTitle: "ECS"
-description: "Keel's archetype ECS stores components in numpy structured arrays per archetype. Queries return column views for vectorized in-place mutation across all entities."
+description: "Keel stores components in numpy structured arrays per archetype. Queries yield per-archetype column views for vectorized in-place mutation across entities."
 ---
 
 Keel's entire data model is an archetype-based Entity Component System (ECS). Every piece of game state — a player's position, a bullet's velocity, a score counter — lives in a component attached to an entity. The ECS groups entities by their exact component types into **archetypes**, which store data in numpy structured arrays laid out column-by-column. This means hot loops over thousands of entities become vectorized numpy operations, not Python `for` loops over individual objects.
@@ -56,7 +56,7 @@ An **archetype** is the set of component types shared by a group of entities. Tw
 
 Each archetype owns one column per component type: a numpy structured array (or Python list) sized to the number of entities currently in that archetype. Rows are added on spawn and removed via swap-remove on despawn, so the array stays compact and cache-friendly.
 
-```
+```text
 Archetype {Position, Velocity}
   positions:  np.ndarray[{'x': float64, 'y': float64}]  — one row per entity
   velocities: np.ndarray[{'x': float64, 'y': float64}]  — one row per entity
@@ -91,7 +91,7 @@ app.world.flush()
 ```
 
 <Note>
-The main loop calls `world.flush()` automatically at the end of every frame. Inside systems you can safely call `world.spawn()` without an immediate flush — the entity appears on the next frame. If you need it to appear within the same code path (for example, during startup), call `world.flush()` explicitly.
+The main loop calls `world.flush()` automatically after every simulation tick (after `POST_UPDATE` completes). Inside systems you can safely call `world.spawn()` without an immediate flush — the entity appears on the next simulation tick. If you need it to appear within the same code path (for example, during startup), call `world.flush()` explicitly.
 </Note>
 
 Passing duplicate component types to `spawn()` raises `ValueError` immediately:
@@ -261,8 +261,10 @@ DESPAWN_QUEUE: list[int] = []
 @app.system(keel.Phase.UPDATE)
 def mark_dead(world, dt):
     for health, in world.query(Health):
-        for i, eid in enumerate(world.query(Health).entities()):
-            if health['hp'][i] <= 0:
+        # health is a numpy column view over all entities in this archetype.
+        # Zip entity IDs with their hp values to find dead entities.
+        for eid, hp in zip(world.query(Health).entities(), health['hp']):
+            if hp <= 0:
                 DESPAWN_QUEUE.append(eid)
 
 @app.system(keel.Phase.POST_UPDATE)
@@ -271,7 +273,7 @@ def flush_dead(world, dt):
         if world.is_alive(eid):
             world.despawn(eid)
     DESPAWN_QUEUE.clear()
-    # flush() is called automatically at end-of-frame by the main loop.
+    # flush() is called automatically after each simulation tick by the main loop.
 ```
 
 ---

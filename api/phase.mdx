@@ -1,5 +1,5 @@
 ---
-title: "Phase — System Execution Order"
+title: "Phase — System Execution Order in Keel's Tick Loop"
 sidebarTitle: "Phase"
 description: "Phase is an IntEnum defining the order systems run each tick: PRE_UPDATE(0), UPDATE(1), POST_UPDATE(2), PRE_RENDER(3), RENDER(4), POST_RENDER(5)."
 ---
@@ -74,9 +74,10 @@ import keel
 app = keel.App()
 
 # PRE_UPDATE — drain asset changes before any game logic
+# (setup_assets registers the poll system automatically when watch_dirs is set)
 @app.system(keel.Phase.PRE_UPDATE)
-def hot_reload(world, dt, assets: keel.AssetRegistry):
-    assets.poll()
+def read_input(world, dt, inp: keel.InputState):
+    pass  # InputState is updated by GLFW callbacks; read it here
 
 # UPDATE — main game logic
 @app.system(keel.Phase.UPDATE)
@@ -89,22 +90,18 @@ def player_input(world, dt, inp: keel.InputState):
         else:
             vel["vx"] = 0.0
 
-# POST_UPDATE — physics runs after all velocity changes are settled
-@app.system(keel.Phase.POST_UPDATE)
-def physics_step(world, dt, phys: keel.Physics2D):
-    phys.step(world, dt)
+# POST_UPDATE — physics bridge runs here (registered by setup_physics_2d automatically)
 
-# PRE_RENDER — update camera before drawing
+# PRE_RENDER — update camera by writing to Camera2D component fields
 @app.system(keel.Phase.PRE_RENDER)
-def update_camera(world, dt, cam: keel.Camera2D):
+def update_camera(world, dt):
     gs = world.query_one(GameState)
     if gs:
-        cam.look_at(gs["target_x"], gs["target_y"])
+        for (cameras,) in world.query(keel.Camera2D):
+            cameras["x"] = gs["target_x"]
+            cameras["y"] = gs["target_y"]
 
-# RENDER — draw calls
-@app.system(keel.Phase.RENDER)
-def draw(world, dt, renderer: keel.Renderer2DSetup):
-    renderer.draw_sprites(world)
+# RENDER — draw calls (registered automatically by setup_renderer_2d)
 
 # POST_RENDER — debug info on top of everything
 @app.system(keel.Phase.POST_RENDER)

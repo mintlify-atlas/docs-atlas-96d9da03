@@ -1,7 +1,7 @@
 ---
-title: "Common Game Patterns in Keel"
+title: "Common Keel Game Patterns and ECS Best Practices"
 sidebarTitle: "Common Patterns"
-description: "Recurring patterns for Keel games: singleton components, side tables for non-numpy data, deferred despawn queues, entity ID tracking for collisions, and manual projectile physics."
+description: "Recurring patterns for Keel: side tables, deferred despawn queues, entity ID tracking for collision events, and manual physics for fast-moving projectiles."
 ---
 
 Every non-trivial Keel game re-invents the same handful of solutions: a single component that holds top-level state, a plain Python dict next to the ECS for data that doesn't fit in numpy, a safe path for despawning during a collision, a set that lets collision events be classified in constant time, and a manual position loop for entities that move too fast for pymunk to track reliably. The patterns below are drawn directly from the Pong, Asteroids, and Platformer examples shipped with Keel. Reach for them before building your own infrastructure.

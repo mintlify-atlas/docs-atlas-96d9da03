@@ -1,7 +1,7 @@
 ---
-title: "Audio: Sound Effects, Music, and Volume Control"
+title: "Keel Audio System: Sound Effects, Music, and Volume"
 sidebarTitle: "Audio"
-description: "Keel's audio engine (miniaudio) plays one-shot sound effects and streaming music tracks. Control per-channel volume, fade music in and out, and bind sounds to entities."
+description: "Keel plays sound effects and streams music via miniaudio. Control master, SFX, and music volumes independently with linear fade-in and fade-out ramps."
 ---
 
 Keel's audio system is built on [miniaudio](https://miniaud.io/) and exposed through a small set of module-level helpers. One-shot sound effects are decoded into memory on first play and mixed in a stereo int16 buffer on a background thread. Music tracks are streamed from disk frame by frame. All three volume channels—master, SFX, and music—are independently adjustable at runtime, and music transitions support linear fade-in and fade-out ramps.

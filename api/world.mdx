@@ -1,7 +1,7 @@
 ---
-title: "World — ECS Entity and Component Management"
+title: "World — ECS Entity, Component, and Resource Manager"
 sidebarTitle: "World"
-description: "World is Keel's ECS core. It manages entities, archetypes, commands, events, and resources. All structural changes are deferred through CommandBuffer and applied at flush()."
+description: "World is Keel's ECS core: entities, archetypes, events, and resources. Changes buffer in CommandBuffer; flush() applies them each simulation tick."
 ---
 
 `World` is the central hub of Keel's Entity-Component-System architecture. It stores every live entity, organises components into cache-friendly archetype tables, routes events through a per-frame bus, holds singleton resources, and drives the `Scheduler`. You never construct a `World` directly in normal usage — `App` creates one and exposes it as `app.world`.

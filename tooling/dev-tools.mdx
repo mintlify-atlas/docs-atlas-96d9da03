@@ -1,7 +1,7 @@
 ---
-title: "Developer Tools: Inspector, Profiler, and Debug Draw"
+title: "Keel Dev Tools: Inspector, Profiler, and Debug Draw"
 sidebarTitle: "Dev Tools"
-description: "Keel's dev tooling bundle includes an ImGui world inspector (F1), a per-system frame profiler (F2), and 2D physics debug draw (F3). Enable everything with keel.dev_tools(app)."
+description: "Keel ships an ImGui world inspector (F1), per-system profiler (F2), and physics debug draw (F3). Enable all three with one call to keel.dev_tools(app)."
 ---
 
 Keel ships a focused set of in-process developer tools that overlay directly on top of your running game. One call wires them all up: the ImGui world inspector lets you browse every entity and its component values in real time, the frame profiler shows per-system millisecond costs with rolling 60-frame averages, and the physics debug draw outlines every collider so you can see exactly what the physics engine sees. All three are optional and are only activated by calling `keel.dev_tools(app)` — nothing runs unless you ask for it.

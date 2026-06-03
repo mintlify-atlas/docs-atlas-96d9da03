@@ -1,7 +1,7 @@
 ---
-title: "App — Keel's Top-Level Entry Point"
+title: "App — Keel's Top-Level Entry Point for Every Game"
 sidebarTitle: "App"
-description: "App owns the World, Scheduler, Window, and InputState. Call App(title, width, height, vsync) to create a game window, register systems, and call app.run() to start the loop."
+description: "App owns the World, Scheduler, Window, and InputState. Call App() to create a window, register systems with @app.system, and start the loop with app.run()."
 ---
 
 `App` is the single object you construct at the top of every Keel game. It initialises a GLFW window, creates a `World`, wires all input callbacks, and owns the `Scheduler` that drives the game loop. Call `app.run()` to block until the window closes; everything else — registering systems, inserting resources, loading assets — happens before that call.
@@ -140,9 +140,10 @@ def apply_velocity(world, dt):
 Systems may declare additional typed parameters beyond `world` and `dt`. The scheduler resolves them from the world's resource map by type annotation:
 
 ```python
-@app.system(keel.Phase.RENDER)
-def draw(world, dt, renderer: keel.Renderer2DSetup):
-    renderer.draw_sprites(world)
+@app.system(keel.Phase.UPDATE)
+def move_with_physics(world, dt, phys: keel.Physics2D):
+    # Physics2D is injected from the world resource map automatically
+    phys.apply_impulse(player_entity, 0.0, 300.0)
 ```
 
 ---

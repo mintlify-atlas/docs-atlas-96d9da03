@@ -1,7 +1,7 @@
 ---
 title: "Physics Module: setup_physics_2d and setup_physics_3d"
 sidebarTitle: "Physics API"
-description: "setup_physics_2d bridges pymunk for 2D physics. setup_physics_3d bridges pybullet for 3D. Both run at Phase.POST_UPDATE and write results back to Transform components."
+description: "setup_physics_2d bridges the ECS to pymunk. setup_physics_3d bridges to pybullet. Both register POST_UPDATE systems that write results back to Transforms."
 ---
 
 Keel's physics layer is a thin ECS bridge: the `Physics2D` and `Physics3D` objects own the actual simulation (a pymunk `Space` and a pybullet DIRECT client, respectively). Every `Phase.POST_UPDATE` tick the bridge runs four phases in order:
@@ -223,14 +223,14 @@ app.world.spawn(
 ## Reading collision events
 
 ```python
-@app.system(keel.Phase.UPDATE)
+@app.system(keel.Phase.POST_UPDATE)
 def on_collision(world, dt):
     for event in world.read_events(keel.CollisionEvent2D):
         if event.entity_a == player_id or event.entity_b == player_id:
             other = event.entity_b if event.entity_a == player_id else event.entity_a
             print(f"Player collided with entity {other}, impulse={event.impulse:.2f} N")
 
-@app.system(keel.Phase.UPDATE)
+@app.system(keel.Phase.POST_UPDATE)
 def on_collision_3d(world, dt):
     for event in world.read_events(keel.CollisionEvent3D):
         print(f"3D collision at ({event.contact_x:.1f}, {event.contact_y:.1f}, {event.contact_z:.1f})")

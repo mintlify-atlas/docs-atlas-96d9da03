@@ -1,7 +1,7 @@
 ---
-title: "Input Handling: Keyboard, Mouse, and Gamepad"
+title: "Keel Input: Keyboard, Mouse, and Gamepad API Guide"
 sidebarTitle: "Input"
-description: "Keel's InputState exposes held-state and edge-detected helpers for keyboard and mouse. Gamepad support covers up to 4 controllers with button and axis events."
+description: "InputState gives held-state and edge-detected polling for keyboard and mouse. Gamepad support covers up to 4 controllers with button and axis events."
 ---
 
 Keel provides two complementary input surfaces: a stateful `InputState` poller on `app.input` for frame-by-frame "is this held right now" checks, and a typed event bus for one-shot reactions. Both are updated by GLFW callbacks on every tick. Edge detection—`is_key_pressed` and `is_key_released`—is snapshotted once at the start of each simulation tick via `begin_frame()`, so a key press is `True` for exactly one frame.
@@ -77,7 +77,7 @@ keel.REPEAT   # OS-level key repeat while held
 For one-shot reactions that must fire exactly once—quit on Escape, fire a weapon—read `KeyEvent` off the world bus instead of polling:
 
 <Note>
-`KeyEvent` is emitted on `PRESS` and `REPEAT` actions, but **never** on `RELEASE`. To detect a key release via events, use `app.input.is_key_released()` or listen to `MouseButtonEvent` for mouse equivalents. For keyboard release events, the polling API is the canonical path.
+`KeyEvent` is emitted on `PRESS` and `REPEAT` actions, but **never** on `RELEASE`. To detect when a key comes up, use `app.input.is_key_released()` — the polling API is the canonical path for keyboard release detection.
 </Note>
 
 ```python
