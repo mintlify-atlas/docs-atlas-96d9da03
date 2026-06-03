@@ -1,0 +1,281 @@
+---
+title: "Assets Module: Registry, Hot Reload, and Scenes"
+sidebarTitle: "Assets API"
+description: "AssetRegistry loads files with handle-based access and extension-dispatched loaders. Hot reload re-uploads assets on change. Scene saves and loads world state as versioned JSON."
+---
+
+Keel's asset pipeline is built around three orthogonal concerns: loading (the `AssetRegistry`), watching for changes (the `FileWatcher`), and serializing world state (the `Scene` facade). All three are optional — `setup_assets` wires them together in one call, or you can use them independently.
+
+---
+
+## Setup
+
+### `setup_assets`
+
+```python
+def setup_assets(
+    app: Any,
+    watch_dirs: list[str] | None = None,
+) -> AssetRegistry
+```
+
+Create or return the `AssetRegistry` on `app`. Registers default loaders for `.json` (raw `dict`) and, when the 2D renderer is already active, image files (`.png`, `.jpg`, `.jpeg`, `.bmp`, `.tga` → `TextureAtlas` integer IDs). When `watch_dirs` is provided, starts a `FileWatcher` and registers a `Phase.PRE_UPDATE` poll system. Idempotent.
+
+```python
+import keel
+
+app = keel.App()
+keel.setup_renderer_2d(app)
+
+# Without hot reload
+registry = keel.setup_assets(app)
+
+# With hot reload watching the assets directory
+registry = keel.setup_assets(app, watch_dirs=["assets/"])
+```
+
+<ParamField path="app" type="Any">
+  The Keel `App` instance.
+</ParamField>
+
+<ParamField path="watch_dirs" type="list[str] | None" default="None">
+  List of directory paths to monitor for file changes. When provided, a `FileWatcher` is created and its `poll()` method is called every `Phase.PRE_UPDATE` tick. Any registered asset whose source file changes is automatically reloaded.
+</ParamField>
+
+**Returns:** The `AssetRegistry` inserted as a world resource.
+
+---
+
+## `AssetRegistry`
+
+`AssetRegistry` is the central handle-based asset cache. All paths are normalized to absolute form (`os.path.normpath(os.path.abspath(path))`) so that `"./hero.png"` and `"/abs/path/hero.png"` hit the same cache slot. Asset IDs are monotonically increasing and never reused after unload.
+
+### Loading assets
+
+```python
+# Load a texture (if 2D renderer is set up, returns int texture ID wrapped as asset)
+handle = registry.load("assets/hero.png")
+
+# Load a JSON config
+handle = registry.load("assets/level.json")
+
+# Get the loaded asset
+data = registry.get(handle)
+```
+
+#### `registry.load(path: str) -> AssetHandle`
+
+Load the asset at `path` and return a stable `AssetHandle`. If the path has already been loaded, the cached handle is returned without re-reading the file.
+
+Raises:
+- `AssetNotFoundError` — path does not exist on disk
+- `NoLoaderError` — no loader is registered for the file's extension
+
+#### `registry.get(handle: AssetHandle) -> Any`
+
+Return the loaded asset object for `handle`. The return type depends on the loader:
+- JSON loader → `dict`
+- Texture loader → `int` (texture ID in the `TextureAtlas`)
+
+Raises `InvalidHandleError` if the handle's asset has been unloaded.
+
+#### `registry.reload(handle: AssetHandle) -> None`
+
+Re-invoke the loader for `handle` and replace the stored asset. Called automatically by `FileWatcher.poll()` for changed files. Can also be called manually for explicit cache invalidation.
+
+#### `registry.unload(handle: AssetHandle) -> None`
+
+Drop the asset for `handle`. Subsequent `get` or `reload` calls on this handle raise `InvalidHandleError`.
+
+#### `registry.handle_for_path(path: str) -> AssetHandle | None`
+
+Return the handle whose normalized path matches `path`, or `None` if it has not been loaded.
+
+### Registering custom loaders
+
+```python
+def my_shader_loader(path: str) -> str:
+    with open(path) as f:
+        return f.read()
+
+registry.register_loader([".glsl", ".vert", ".frag"], my_shader_loader)
+handle = registry.load("shaders/sprite.vert")
+source = registry.get(handle)  # str
+```
+
+#### `registry.register_loader(extensions: list[str], loader_fn: Callable[[str], Any]) -> None`
+
+Register `loader_fn` as the handler for every extension in `extensions`. Extensions are normalized to lowercase with a leading dot. Overwrites any previously registered loader for the same extension.
+
+### Built-in loaders
+
+| Extension(s) | Loaded type | Notes |
+|---|---|---|
+| `.json` | `dict` | `json.load` |
+| `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tga` | `int` (texture ID) | Requires `setup_renderer_2d` to be active; uploads to `TextureAtlas` via PIL |
+
+### Utility methods
+
+```python
+count = registry.loaded_count()     # int: number of live assets
+handles = registry.handles()        # list[AssetHandle]: snapshot of all live handles
+path in registry                    # True if path's asset is loaded
+handle in registry                  # True if handle's asset is live
+```
+
+---
+
+## `AssetHandle`
+
+`AssetHandle` is an immutable, hashable reference to a loaded asset. Equality is by normalized path (not by `id`), so two handles for the same file are equal even if loaded in different calls.
+
+<ParamField path="id" type="int">
+  Monotonically increasing integer assigned at load time. Unique per `AssetRegistry` lifetime; never reused.
+</ParamField>
+
+<ParamField path="path" type="str">
+  The normalized absolute path the asset was loaded from.
+</ParamField>
+
+<ParamField path="asset_type" type="type">
+  The Python type of the loaded asset object (e.g. `dict`, `int`). Informational only.
+</ParamField>
+
+```python
+handle = registry.load("assets/config.json")
+print(handle)  # AssetHandle(id=1, path='/abs/assets/config.json', type=dict)
+```
+
+---
+
+## Hot Reload
+
+### `FileWatcher`
+
+`FileWatcher` wraps a [watchdog](https://github.com/gorakhargosh/watchdog) `Observer` with a thread-safe `queue.Queue`. The watchdog thread only enqueues changed paths — all registry interaction (including GPU texture re-upload) happens on the main thread inside `poll()`, which is registered as a `Phase.PRE_UPDATE` system by `setup_assets`.
+
+```python
+# Manual usage (setup_assets handles this automatically)
+from keel.assets import FileWatcher
+
+watcher = FileWatcher(registry)
+watcher.watch("assets/")
+# ... in your game loop ...
+reload_count = watcher.poll()  # call once per frame
+watcher.stop()  # on shutdown
+```
+
+#### Methods
+
+<ParamField path="watch(directory: str)" type="method">
+  Start watching `directory` recursively. Idempotent per directory. Raises `RuntimeError` if the watcher has been stopped.
+</ParamField>
+
+<ParamField path="unwatch(directory: str)" type="method">
+  Stop watching `directory`. No-op if it wasn't being watched.
+</ParamField>
+
+<ParamField path="poll() -> int" type="method">
+  Drain the event queue on the **calling thread** and reload any assets whose source files changed. Returns the number of assets reloaded this call. Failed reloads emit a `logging.WARNING` but do not raise.
+</ParamField>
+
+<ParamField path="stop()" type="method">
+  Stop the watchdog observer thread and join it (timeout 2 s). Idempotent.
+</ParamField>
+
+<ParamField path="started" type="bool">
+  `True` if the observer has been started and not stopped.
+</ParamField>
+
+<ParamField path="watched_directories() -> list[str]" type="method">
+  Snapshot of currently watched directories.
+</ParamField>
+
+<Note>
+  `FileWatcher` requires `pip install watchdog`. It is an optional dependency; `setup_assets` without `watch_dirs` does not import watchdog.
+</Note>
+
+---
+
+## Scene Serialization
+
+`Scene` is a static facade for saving and loading every component of every live entity in a `World` to a JSON file. The schema is versioned (`"version": 1`); loading a file with a mismatched version raises `SceneVersionError`.
+
+### `Scene.save`
+
+```python
+@staticmethod
+def Scene.save(world: Any, path: str) -> None
+```
+
+Atomically serialize every component of every live entity in `world` to `path`. The write is atomic: data is first written to `<path>.tmp` and then `os.replace`d onto the target, so a crash mid-write cannot corrupt an existing save file.
+
+Component fields must be JSON-serializable scalars (`bool`, `int`, `float`, `str`, `None`). Non-serializable fields emit a `RuntimeWarning` and are skipped.
+
+```python
+from keel import Scene
+
+Scene.save(app.world, "saves/slot1.json")
+```
+
+#### On-disk schema
+
+```json
+{
+  "version": 1,
+  "entities": [
+    {
+      "id": 42,
+      "components": {
+        "Transform2D": {"x": 1.0, "y": 2.0, "rotation": 0.0, "scale_x": 1.0, "scale_y": 1.0},
+        "Sprite": {"texture_id": 0, "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0, "width": 64.0, "height": 64.0, "flip_x": false, "flip_y": false}
+      }
+    }
+  ]
+}
+```
+
+### `Scene.load`
+
+```python
+@staticmethod
+def Scene.load(world: Any, path: str, registry: AssetRegistry | None = None) -> list[int]
+```
+
+Deserialize entities from `path` and spawn them **additively** into `world` (the world is not cleared first). Returns the list of new entity IDs. Component classes are resolved by walking `sys.modules` for classes decorated with `@component` — all component modules must be imported before calling `load`.
+
+Unknown component names emit `RuntimeWarning` and are skipped. Invalid field values for known components also emit `RuntimeWarning` and skip that component.
+
+```python
+from keel import Scene
+
+new_ids = Scene.load(app.world, "saves/slot1.json")
+app.world.flush()
+print(f"Loaded {len(new_ids)} entities")
+```
+
+### `Scene.load_additive`
+
+Identical to `Scene.load` — the name documents that the world is not cleared first. Both methods are interchangeable.
+
+### `SceneVersionError`
+
+Raised when `Scene.load` encounters a file whose `"version"` field does not equal `Scene.VERSION` (`1`). Catch it to handle forward/backward compatibility:
+
+```python
+try:
+    Scene.load(app.world, "save.json")
+except keel.SceneVersionError as e:
+    print(f"Incompatible save file: {e}")
+```
+
+---
+
+## Exception types
+
+| Exception | Inherits | Raised when |
+|---|---|---|
+| `AssetNotFoundError` | `FileNotFoundError` | `registry.load(path)` — path does not exist |
+| `NoLoaderError` | `KeyError` | `registry.load(path)` — no loader for the extension |
+| `InvalidHandleError` | `KeyError` | `registry.get(handle)` / `registry.reload(handle)` — handle's asset has been unloaded, or argument is not an `AssetHandle` |
+| `SceneVersionError` | `Exception` | `Scene.load` — file version ≠ `Scene.VERSION` |

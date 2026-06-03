@@ -1,0 +1,385 @@
+---
+title: "Asset Registry, Hot Reload, and Scene Persistence"
+sidebarTitle: "Assets"
+description: "Keel's AssetRegistry loads images and JSON with handle-based access. Watchdog-powered hot reload re-uploads textures on file change. Scenes save and load as versioned JSON."
+---
+
+Keel's asset pipeline has three layers: a central `AssetRegistry` that caches loaded assets behind stable integer handles, a watchdog-powered `FileWatcher` that queues file changes on a background thread and drains them safely on the main thread, and a `Scene` facade that serializes and restores entire world states as atomic JSON files. None of these layers own simulation state — they slot in and out via world resources and `PRE_UPDATE` systems without touching the ECS core.
+
+---
+
+## AssetRegistry
+
+The `AssetRegistry` is the single entry point for loading any file-backed asset. Every path is normalized to an absolute form before being used as a cache key, so `"./hero.png"` and `"assets/../assets/hero.png"` resolve to the same slot. Asset IDs are monotonically increasing integers that are never reused after an unload.
+
+### Setup
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+
+app = keel.App(title="My Game", width=800, height=600)
+setup_renderer_2d(app)
+
+# Minimal — no hot reload.
+registry = keel.setup_assets(app)
+
+# With hot reload watching the assets/ directory.
+registry = keel.setup_assets(app, watch_dirs=["assets"])
+
+# Convenience form on the App object (identical behavior).
+registry = app.setup_assets(watch_dirs=["assets"])
+```
+
+`setup_assets` is idempotent — calling it twice on the same `app` returns the same `AssetRegistry` without registering duplicate systems.
+
+<Note>
+Call `setup_renderer_2d(app)` **before** `setup_assets(app)` if you want texture loading wired up automatically. When `setup_assets` detects that the renderer has already been initialized, it binds the texture loader to the renderer's atlas immediately. If you call them in the reverse order, the renderer's own init path wires the loader instead.
+</Note>
+
+### Loading assets
+
+`registry.load(path)` returns an `AssetHandle`. Subsequent calls with the same path return the cached handle without touching disk.
+
+```python
+# Load a JSON data file.
+config_handle = registry.load("assets/config.json")
+config = registry.get(config_handle)   # returns the parsed dict
+print(config["player_speed"])
+
+# Load a texture (requires setup_renderer_2d to have run first).
+texture_handle = registry.load("assets/hero.png")
+texture_id = registry.get(texture_handle)  # returns the atlas texture_id (int)
+
+# Spawn a sprite using the texture.
+app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.Sprite(texture_id=texture_id, width=64.0, height=64.0),
+)
+```
+
+### AssetHandle
+
+`AssetHandle` is an immutable, hashable object with three fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `int` | Monotonically increasing integer; never reused |
+| `path` | `str` | Normalized absolute path used as cache key |
+| `asset_type` | `type` | Python type of the loaded asset |
+
+Handles are equal when their `path` fields match, so you can use them as dict keys or set members.
+
+### Registry methods
+
+| Method | Description |
+|---|---|
+| `registry.load(path)` | Load or return the cached `AssetHandle` for `path` |
+| `registry.get(handle)` | Return the loaded asset; raises `InvalidHandleError` if unloaded |
+| `registry.reload(handle)` | Re-invoke the loader and replace the stored asset in place |
+| `registry.unload(handle)` | Drop the asset; subsequent `get`/`reload` raise |
+| `registry.loader_for(path)` | Return the registered loader callable for `path`'s extension, or `None` |
+| `registry.handle_for_path(path)` | Return the handle for a normalized path, or `None` |
+| `registry.handles()` | Snapshot list of every live `AssetHandle` |
+| `registry.loaded_count()` | Number of assets currently in the cache |
+| `path in registry` | `True` if the path has a live handle |
+| `handle in registry` | `True` if the handle's asset is loaded |
+
+### Built-in loaders
+
+`setup_assets` registers two loaders automatically:
+
+<CardGroup cols={2}>
+  <Card title="JSON loader" icon="brackets-curly">
+    **Extensions:** `.json`
+
+    Reads the file with `json.load` and returns whatever Python object the JSON represents — typically a `dict` or `list`. Useful for level data, game config, or lookup tables.
+  </Card>
+  <Card title="Texture loader" icon="image">
+    **Extensions:** `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tga`
+
+    Decodes the image with Pillow, uploads it to the renderer's `TextureAtlas`, and returns the `texture_id` integer. Only available after `setup_renderer_2d` has been called.
+  </Card>
+</CardGroup>
+
+### Registering custom loaders
+
+Call `registry.register_loader(extensions, loader_fn)` to add support for any file format. The loader receives the normalized absolute path and must return the loaded asset:
+
+```python
+def my_audio_loader(path: str):
+    # Return any Python object — the registry stores it as-is.
+    with open(path, "rb") as f:
+        return f.read()
+
+registry.register_loader([".wav", ".ogg"], my_audio_loader)
+handle = registry.load("assets/sounds/jump.wav")
+raw_bytes = registry.get(handle)
+```
+
+### Exception types
+
+| Exception | Base class | When raised |
+|---|---|---|
+| `keel.AssetNotFoundError` | `FileNotFoundError` | `registry.load` given a path that does not exist on disk |
+| `keel.NoLoaderError` | `KeyError` | No loader is registered for the file's extension |
+| `keel.InvalidHandleError` | `KeyError` | `get` or `reload` called on a handle whose asset has been unloaded |
+
+---
+
+## Hot Reload
+
+When `watch_dirs` is passed to `setup_assets`, Keel creates a `FileWatcher` that monitors those directories recursively using [watchdog](https://python-watchdog.readthedocs.io/). File changes are deliberately not applied on the watchdog thread — GL texture re-uploads must run on the main thread that owns the OpenGL context. Instead, the handler enqueues paths into a thread-safe `queue.Queue`, and `FileWatcher.poll()` drains the queue inside a `PRE_UPDATE` system registered automatically by `setup_assets`.
+
+```
+File saved on disk
+  → watchdog observer thread: event.src_path put into queue
+  → next frame, PRE_UPDATE: FileWatcher.poll() drains queue
+  → registry.reload(handle) called on the main thread
+  → TextureAtlas.reload(id) re-uploads pixels to the GPU
+  → Sprite.texture_id is unchanged — pixels update invisibly
+```
+
+The handle and its `texture_id` are stable across reloads. Any `Sprite` component already referencing that `texture_id` picks up the new pixels with no ECS mutation.
+
+### Hot reload example
+
+This is a condensed version of `examples/asset_hot_reload.py`:
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+from pathlib import Path
+
+HERO_PATH = Path("assets/hero.png")
+
+app = keel.App(title="Hot Reload", width=600, height=600)
+setup_renderer_2d(app)
+
+# Pass the directory to watch, not the file itself.
+registry = app.setup_assets(watch_dirs=[str(HERO_PATH.parent)])
+
+hero_handle = registry.load(str(HERO_PATH))
+app.world.spawn(
+    keel.Transform2D(x=300.0, y=300.0),
+    keel.Sprite(texture_id=registry.get(hero_handle), width=256.0, height=256.0),
+)
+
+@app.system(keel.Phase.UPDATE)
+def quit_on_escape(world, dt):
+    if app.input.is_key_down(keel.KEY_ESCAPE):
+        app.window.close()
+
+# Now open assets/hero.png in any image editor and save.
+# The sprite updates on the next frame automatically.
+app.run()
+```
+
+### FileWatcher API
+
+`FileWatcher` is also available directly if you need lower-level control:
+
+| Method | Description |
+|---|---|
+| `watcher.watch(directory)` | Start watching `directory` recursively. Idempotent per directory. |
+| `watcher.unwatch(directory)` | Stop watching `directory`. |
+| `watcher.poll()` | Drain the change queue and reload matching assets. Returns the reload count. |
+| `watcher.stop()` | Stop the watchdog observer and join its thread. Idempotent. |
+| `watcher.watched_directories()` | List of currently watched directories. |
+| `watcher.started` | `True` if the observer is running. |
+| `watcher.last_reload_count` | Count of assets reloaded on the most recent `poll()` call. |
+
+<Warning>
+A failed reload (e.g., the file is corrupted or was deleted mid-write) does not crash the loop. `FileWatcher.poll()` logs a `WARNING` via Python's `logging` module and continues. To surface these warnings, configure a log handler before calling `setup_assets`:
+
+```python
+import logging
+logging.basicConfig(level=logging.WARNING)
+```
+</Warning>
+
+---
+
+## Scene Persistence
+
+`keel.Scene` serializes the entire world state—every component on every live entity—to a versioned JSON file. Save and load are static methods, so no setup call is needed.
+
+### Save
+
+```python
+keel.Scene.save(world, "scenes/game.json")
+```
+
+`Scene.save` walks every archetype, serializes all component fields that are JSON-safe (scalars, booleans, strings), writes to `<path>.tmp`, and atomically renames it to the target with `os.replace`. A mid-write crash cannot corrupt a previous save file.
+
+```python
+def Scene.save(world: Any, path: str) -> None: ...
+```
+
+Fields that cannot be serialized (non-scalar types, objects) are skipped with a `RuntimeWarning`. Numpy scalars are converted to native Python automatically.
+
+### Load
+
+```python
+ids = keel.Scene.load(world, "scenes/game.json")
+```
+
+`Scene.load` **adds** entities to the world without clearing it first (additive load). It returns a list of the newly spawned entity IDs. To replace the world state entirely, despawn all existing entities before loading:
+
+```python
+# Clear the world first.
+for arch in app.world.archetypes.all_archetypes():
+    for eid in list(arch.entities[:arch.length]):
+        app.world.despawn(eid)
+app.world.flush()
+
+# Then load the saved state.
+ids = keel.Scene.load(app.world, "scenes/game.json")
+print(f"loaded {len(ids)} entities")
+```
+
+`Scene.load_additive` is an alias for `Scene.load` that makes the additive intent explicit in code.
+
+### Version safety
+
+Every save file includes `"version": 1`. If you attempt to load a file whose `version` field does not match `Scene.VERSION`, a `SceneVersionError` is raised immediately before any entities are spawned:
+
+```python
+from keel.assets import SceneVersionError
+
+try:
+    keel.Scene.load(world, "scenes/old_save.json")
+except SceneVersionError as e:
+    print(f"incompatible save file: {e}")
+```
+
+### Component discovery
+
+`Scene.load` resolves component class names by scanning all modules in `sys.modules` for classes carrying the `__keel_component__` attribute (set by `@keel.component`). This means every component module must be **imported before** loading a scene that contains those components. Unknown component names emit a `RuntimeWarning` and skip the entry rather than raising.
+
+### Scene example
+
+This is a condensed version of `examples/scene_save_load.py`:
+
+```python
+import random
+import keel
+from keel.renderer import setup_renderer_2d
+from pathlib import Path
+
+SAVE_PATH = Path("scenes/scene.json")
+
+@keel.component
+class Bouncer:
+    vx: float = 0.0
+    vy: float = 0.0
+
+app = keel.App(title="Scene Demo", width=800, height=600)
+setup_renderer_2d(app)
+
+# Spawn some entities.
+for _ in range(20):
+    app.world.spawn(
+        keel.Transform2D(
+            x=random.uniform(40.0, 760.0),
+            y=random.uniform(40.0, 560.0),
+        ),
+        keel.Sprite(texture_id=0, width=24.0, height=24.0),
+        Bouncer(
+            vx=random.uniform(-150.0, 150.0),
+            vy=random.uniform(-150.0, 150.0),
+        ),
+    )
+app.world.flush()
+
+def clear_world():
+    for arch in app.world.archetypes.all_archetypes():
+        for eid in list(arch.entities[:arch.length]):
+            app.world.despawn(eid)
+    app.world.flush()
+
+@app.system(keel.Phase.UPDATE)
+def hotkeys(world, dt):
+    # F5: save.
+    if app.input.is_key_pressed(keel.KEY_F5):
+        SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        keel.Scene.save(world, str(SAVE_PATH))
+        print(f"saved → {SAVE_PATH}")
+
+    # F9: clear + reload.
+    if app.input.is_key_pressed(keel.KEY_F9) and SAVE_PATH.exists():
+        clear_world()
+        ids = keel.Scene.load(app.world, str(SAVE_PATH))
+        print(f"loaded {len(ids)} entities")
+
+    if app.input.is_key_down(keel.KEY_ESCAPE):
+        app.window.close()
+
+app.run()
+```
+
+### On-disk format
+
+The JSON schema is straightforward and human-readable:
+
+```json
+{
+  "version": 1,
+  "entities": [
+    {
+      "id": 1,
+      "components": {
+        "Transform2D": { "x": 123.4, "y": 56.7, "rotation": 0.0, "scale_x": 1.0, "scale_y": 1.0 },
+        "Sprite": { "texture_id": 0, "width": 24.0, "height": 24.0, "r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0 },
+        "Bouncer": { "vx": -87.3, "vy": 142.1 }
+      }
+    }
+  ]
+}
+```
+
+The `id` field is the entity's integer ID from the originating world. On load, new IDs are assigned by `world.spawn`; the original IDs in the file are not preserved.
+
+### Conventional project layout
+
+`keel new mygame` scaffolds these directories for you:
+
+```text
+mygame/
+├── assets/     ← pass to setup_assets(watch_dirs=["assets"])
+│   └── .gitkeep
+└── scenes/     ← conventional home for Scene.save output
+    └── .gitkeep
+```
+
+---
+
+## API Quick Reference
+
+### AssetRegistry
+
+| Symbol | Kind | Description |
+|---|---|---|
+| `keel.setup_assets(app, watch_dirs=None)` | Function | Create / return the `AssetRegistry`. Idempotent. |
+| `app.setup_assets(watch_dirs=None)` | Method | Convenience form; identical behavior. |
+| `keel.AssetRegistry` | Class | Central asset cache — load, get, reload, unload. |
+| `keel.AssetHandle` | Class | Immutable hashable reference to a loaded asset. |
+| `keel.AssetNotFoundError` | Exception | Path does not exist on disk. |
+| `keel.NoLoaderError` | Exception | No loader registered for the file's extension. |
+| `keel.InvalidHandleError` | Exception | Handle's asset has been unloaded. |
+
+### Hot Reload
+
+| Symbol | Kind | Description |
+|---|---|---|
+| `keel.FileWatcher` | Class | Watchdog-powered change queue with main-thread `poll()`. |
+
+### Scene Persistence
+
+| Symbol | Kind | Description |
+|---|---|---|
+| `keel.Scene.save(world, path)` | Static method | Serialize world to atomic JSON. |
+| `keel.Scene.load(world, path)` | Static method | Deserialize and spawn additively; returns list of new IDs. |
+| `keel.Scene.load_additive(world, path)` | Static method | Alias for `load`; documents additive intent. |
+| `keel.Scene.VERSION` | `int` | Current schema version (`1`). |
+| `keel.SceneVersionError` | Exception | File version does not match `Scene.VERSION`. |

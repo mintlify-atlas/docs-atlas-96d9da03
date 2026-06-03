@@ -1,0 +1,218 @@
+---
+title: "Keel CLI: new, run, and build Commands"
+sidebarTitle: "CLI"
+description: "The keel CLI scaffolds new projects with keel new, runs them with file-change hot reload using keel run, and provides a build stub. Installed automatically with keelpy."
+---
+
+The Keel command-line interface gives you three subcommands for your entire development workflow: `keel new` to scaffold a fresh project in seconds, `keel run` to start a file-watching dev loop that restarts your game on every `.py` save, and `keel build` (a stub for v1) as a placeholder for future packaging support. The CLI is installed automatically as part of `keelpy` — no extra install step needed.
+
+```bash
+pip install keelpy
+keel --help
+```
+
+```
+usage: keel [-h] command ...
+
+Keel developer CLI: scaffold, run, and (later) build projects.
+
+positional arguments:
+  command
+    new      Scaffold a new project directory
+    run      Run a project with .py hot reload
+    build    Package project for distribution (stub for v1)
+```
+
+---
+
+## `keel new`
+
+`keel new <project_name>` creates a complete project directory structure and populates it with starter files. The directory name is the project name.
+
+```bash
+keel new mygame
+```
+
+```
+[keel] created project at mygame/
+```
+
+### Generated file tree
+
+```text
+mygame/
+├── main.py
+├── pyproject.toml
+├── README.md
+├── assets/
+│   └── .gitkeep
+└── scenes/
+    └── .gitkeep
+```
+
+<CardGroup cols={2}>
+  <Card title="main.py" icon="file-code">
+    A working entry point that creates an `App`, calls `setup_renderer_2d` and `setup_assets`, registers stub `update` and `render` systems, and calls `app.run()`.
+  </Card>
+  <Card title="pyproject.toml" icon="file">
+    A minimal PEP 517 build descriptor with `keelpy` as a dependency and a `[project.scripts]` entry pointing at `main:app.run`.
+  </Card>
+  <Card title="assets/" icon="folder-open">
+    Watched by the asset hot-reload system (`setup_assets`). Drop textures (PNG, JPG, BMP, TGA) and JSON data files here.
+  </Card>
+  <Card title="scenes/" icon="folder">
+    Conventional home for `Scene.save` JSON output. Not watched automatically — reference it explicitly in save/load calls.
+  </Card>
+</CardGroup>
+
+### Scaffolded `main.py`
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+from keel.assets import setup_assets
+
+app = keel.App(title="mygame", width=800, height=600)
+assets = setup_assets(app, watch_dirs=["assets/"])
+renderer = setup_renderer_2d(app)
+
+
+@app.system(keel.Phase.UPDATE)
+def update(world, dt):
+    pass
+
+
+@app.system(keel.Phase.RENDER)
+def render(world, dt):
+    pass
+
+
+if __name__ == "__main__":
+    app.run()
+```
+
+### Error: directory already exists
+
+If the target directory exists, the command prints an error to stderr and exits with code `1`. It never overwrites an existing project.
+
+```bash
+keel new mygame
+# [keel] error: 'mygame' already exists
+```
+
+---
+
+## `keel run`
+
+`keel run [entry]` starts your entry script in a subprocess and restarts it automatically whenever any `.py` file in the project directory changes. The default entry point is `main.py`.
+
+```bash
+# Use the default entry point (main.py).
+keel run
+
+# Use a custom entry point.
+keel run src/game.py
+```
+
+```
+[keel] running main.py
+```
+
+When a `.py` file is saved:
+
+```
+[keel] reloading...
+```
+
+Press `Ctrl+C` to exit the dev loop:
+
+```
+^C
+[keel] shutting down
+```
+
+### How the watcher works
+
+<Steps>
+  <Step title="Start subprocess">
+    Launches the entry script as `python <entry>` using the same Python interpreter that is running `keel run`. The process starts immediately.
+  </Step>
+  <Step title="Watch for .py changes">
+    A `watchdog` `Observer` monitors the project directory recursively. It reacts to `on_modified`, `on_created`, and `on_moved` events and enqueues the changed path when the file ends in `.py`.
+  </Step>
+  <Step title="Debounce burst saves">
+    After the first change is queued, the loop sleeps for **50 ms** and drains any additional events that arrived during that window. Multiple rapid saves (editor auto-save flushes, formatting passes) are coalesced into one single reload.
+  </Step>
+  <Step title="Restart">
+    Terminates the old process (SIGTERM → 3-second wait → SIGKILL), then spawns a fresh subprocess from the entry script. No state is preserved between restarts.
+  </Step>
+  <Step title="Ctrl+C to exit">
+    `KeyboardInterrupt` stops the loop. The watcher observer is joined (up to 2 s) and the running subprocess receives the same SIGTERM → SIGKILL treatment so no zombie processes are left behind.
+  </Step>
+</Steps>
+
+### Process termination sequence
+
+```
+SIGTERM → wait up to 3 s → SIGKILL (if still alive)
+```
+
+This gives your game's shutdown hooks time to run (e.g. closing the audio engine or flushing a save file) before the process is force-killed. If the process is already gone when `keel run` tries to terminate it, the step is a no-op.
+
+### Entry file not found
+
+If the entry script does not exist, the command prints an error and exits with code `1` without starting a subprocess or observer:
+
+```bash
+keel run missing.py
+# [keel] error: entry 'missing.py' not found
+```
+
+### What triggers a reload
+
+| Event type | Triggers reload? |
+|---|---|
+| `.py` file saved (modified) | ✅ Yes |
+| `.py` file created | ✅ Yes |
+| `.py` file renamed / moved | ✅ Yes (uses destination path) |
+| Any non-`.py` file change | ❌ No |
+| Directory events | ❌ No |
+
+Asset files (textures, JSON) are handled separately by the in-process asset watcher — see the [Hot Reload](/tooling/hot-reload) page.
+
+---
+
+## `keel build`
+
+`keel build` is a stub for v1. It prints a hint and exits cleanly with code `0`.
+
+```bash
+keel build
+```
+
+```
+[keel] build: not yet implemented.
+Run your project with: python main.py
+```
+
+<Note>
+  Packaging support is on the roadmap. For now, distribute your project as a Python package and have users run it with `python main.py` or the script entry point defined in `pyproject.toml`. The `[project.scripts]` section generated by `keel new` already provides a named command when the package is installed with `pip install -e .`.
+</Note>
+
+---
+
+## Quick-start workflow
+
+```bash
+# 1. Scaffold the project.
+keel new mygame
+cd mygame
+
+# 2. (Optional) install dev tooling.
+pip install "keelpy[tools]"
+
+# 3. Start the dev loop.
+keel run
+```
+
+Edit any `.py` file and save — the game restarts within 50 ms. Press **F1** for the world inspector, **F2** for the profiler, and **F3** for the physics debug draw (if `keel.dev_tools(app)` is called in your `main.py`).

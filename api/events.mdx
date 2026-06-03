@@ -1,0 +1,433 @@
+---
+title: "Events — Typed Event Bus Reference"
+sidebarTitle: "Events"
+description: "Keel's typed event bus emits and reads strongly-typed events within a frame. All queues clear at frame start. Built-in events cover input, collisions, and window resize."
+---
+
+Keel uses a typed, per-frame event bus to communicate between systems without tight coupling. Any `@keel.event`-decorated class becomes an event type. Instances are queued with `world.emit()` and iterated with `world.read_events()`. All queues are cleared automatically at the start of every visual frame, so events emitted in tick N are readable by later systems in tick N but gone by tick N+1.
+
+```python
+import keel
+
+@keel.event
+class EnemyDied:
+    entity: int
+    position_x: float
+    position_y: float
+
+@app.system(keel.Phase.UPDATE)
+def check_health(world, dt):
+    for eid in world.query(Health).entities():
+        hp = world.get(eid, Health)
+        if hp and hp["hp"] <= 0:
+            pos = world.get(eid, Position)
+            world.emit(EnemyDied(entity=eid,
+                                  position_x=pos["x"] if pos else 0.0,
+                                  position_y=pos["y"] if pos else 0.0))
+            world.despawn(eid)
+
+@app.system(keel.Phase.UPDATE, after=check_health)
+def on_enemy_died(world, dt):
+    for evt in world.read_events(EnemyDied):
+        print(f"Enemy {evt.entity} died at ({evt.position_x}, {evt.position_y})")
+```
+
+---
+
+## Defining Event Types
+
+### `@keel.event`
+
+Marks a class as an event type. If the class is not already a `dataclasses.dataclass`, `@keel.event` applies `@dataclass` automatically. A `__keel_event__ = True` attribute is set on the class to tag it for internal bookkeeping.
+
+```python
+@keel.event
+class ScoreChanged:
+    old_score: int
+    new_score: int
+    reason: str = "unknown"
+```
+
+You can also apply `@dataclass` yourself first — `@keel.event` is idempotent with respect to dataclass decoration:
+
+```python
+from dataclasses import dataclass
+
+@keel.event
+@dataclass
+class LevelComplete:
+    level: int
+    time_seconds: float
+```
+
+---
+
+## Emitting and Reading Events
+
+### `world.emit(event_instance)`
+
+Queue an event instance for the current frame. The event is appended to the per-type queue and is immediately readable by any system that runs later in the same frame (including later ticks of the same simulation phase).
+
+<ParamField path="event_instance" type="Any" required>
+  An instance of a `@keel.event`-decorated class.
+</ParamField>
+
+```python
+world.emit(ScoreChanged(old_score=0, new_score=10, reason="kill"))
+```
+
+---
+
+### `world.read_events(event_type) -> Iterator`
+
+Iterate over all events of `event_type` queued this frame. Returns an empty iterator if no events of that type were emitted.
+
+<ParamField path="event_type" type="type" required>
+  The `@keel.event` class to filter on.
+</ParamField>
+
+<ResponseField name="returns" type="Iterator[Any]">
+  An iterator over all queued instances of `event_type` for this frame. Iteration does **not** consume events — multiple systems can read the same queue independently.
+</ResponseField>
+
+```python
+for evt in world.read_events(ScoreChanged):
+    update_hud(evt.new_score)
+```
+
+---
+
+## Built-in Input Events
+
+These event types are emitted automatically by Keel's GLFW callback system whenever the corresponding hardware event occurs. They are all `@keel.event` dataclasses defined in `keel.input`.
+
+---
+
+### `KeyEvent`
+
+Emitted on key **press** and **repeat** transitions. Not emitted on key release (use `InputState.is_key_released()` for that).
+
+<ParamField path="key" type="int">
+  GLFW key code — one of the `keel.KEY_*` constants (e.g. `keel.KEY_SPACE`, `keel.KEY_W`).
+</ParamField>
+
+<ParamField path="scancode" type="int">
+  Platform-specific raw scancode for the physical key.
+</ParamField>
+
+<ParamField path="action" type="int">
+  `keel.PRESS` or `keel.REPEAT`.
+</ParamField>
+
+<ParamField path="mods" type="int">
+  Bitfield of active modifier keys (GLFW modifier constants).
+</ParamField>
+
+```python
+@app.system(keel.Phase.UPDATE)
+def on_key(world, dt):
+    for evt in world.read_events(keel.KeyEvent):
+        if evt.key == keel.KEY_ESCAPE and evt.action == keel.PRESS:
+            world.emit(QuitRequested())
+```
+
+---
+
+### `MouseButtonEvent`
+
+Emitted on every mouse button press and release.
+
+<ParamField path="button" type="int">
+  GLFW mouse button constant — `keel.MOUSE_BUTTON_LEFT`, `keel.MOUSE_BUTTON_RIGHT`, `keel.MOUSE_BUTTON_MIDDLE`, or `MOUSE_BUTTON_4` through `MOUSE_BUTTON_8`.
+</ParamField>
+
+<ParamField path="action" type="int">
+  `keel.PRESS` or `keel.RELEASE`.
+</ParamField>
+
+<ParamField path="mods" type="int">
+  Active modifier key bitfield.
+</ParamField>
+
+```python
+for evt in world.read_events(keel.MouseButtonEvent):
+    if evt.button == keel.MOUSE_BUTTON_LEFT and evt.action == keel.PRESS:
+        handle_click(world)
+```
+
+---
+
+### `MouseMoveEvent`
+
+Emitted whenever the cursor moves within the window's content area.
+
+<ParamField path="x" type="float">
+  Cursor X position in window pixel coordinates (origin at top-left).
+</ParamField>
+
+<ParamField path="y" type="float">
+  Cursor Y position in window pixel coordinates (origin at top-left).
+</ParamField>
+
+```python
+for evt in world.read_events(keel.MouseMoveEvent):
+    update_cursor_entity(world, evt.x, evt.y)
+```
+
+---
+
+### `MouseScrollEvent`
+
+Emitted on scroll wheel movement.
+
+<ParamField path="x_offset" type="float">
+  Horizontal scroll delta (positive = right).
+</ParamField>
+
+<ParamField path="y_offset" type="float">
+  Vertical scroll delta (positive = up / away from user).
+</ParamField>
+
+```python
+for evt in world.read_events(keel.MouseScrollEvent):
+    zoom_camera(world, evt.y_offset * 0.1)
+```
+
+---
+
+### `WindowResizeEvent`
+
+Emitted when the framebuffer is resized (e.g. the user drags the window edge). Width and height are in **pixels**, not logical screen coordinates.
+
+<ParamField path="width" type="int">
+  New framebuffer width in pixels.
+</ParamField>
+
+<ParamField path="height" type="int">
+  New framebuffer height in pixels.
+</ParamField>
+
+```python
+@app.system(keel.Phase.PRE_RENDER)
+def on_resize(world, dt):
+    for evt in world.read_events(keel.WindowResizeEvent):
+        app.ctx.viewport = (0, 0, evt.width, evt.height)
+        update_projection(world, evt.width, evt.height)
+```
+
+---
+
+### `GamepadButtonEvent`
+
+Emitted on every gamepad button press or release state flip.
+
+<ParamField path="gamepad_id" type="int">
+  GLFW joystick/gamepad ID (0-based index).
+</ParamField>
+
+<ParamField path="button" type="int">
+  GLFW gamepad button constant — one of `keel.GAMEPAD_BUTTON_A`, `GAMEPAD_BUTTON_B`, `GAMEPAD_BUTTON_X`, `GAMEPAD_BUTTON_Y`, `GAMEPAD_BUTTON_LEFT_BUMPER`, `GAMEPAD_BUTTON_RIGHT_BUMPER`, `GAMEPAD_BUTTON_BACK`, `GAMEPAD_BUTTON_START`, `GAMEPAD_BUTTON_GUIDE`, `GAMEPAD_BUTTON_LEFT_THUMB`, `GAMEPAD_BUTTON_RIGHT_THUMB`, `GAMEPAD_BUTTON_DPAD_UP`, `GAMEPAD_BUTTON_DPAD_DOWN`, `GAMEPAD_BUTTON_DPAD_LEFT`, `GAMEPAD_BUTTON_DPAD_RIGHT`.
+</ParamField>
+
+<ParamField path="action" type="int">
+  `keel.PRESS` or `keel.RELEASE`.
+</ParamField>
+
+```python
+for evt in world.read_events(keel.GamepadButtonEvent):
+    if evt.button == keel.GAMEPAD_BUTTON_A and evt.action == keel.PRESS:
+        world.emit(JumpEvent())
+```
+
+---
+
+### `GamepadAxisEvent`
+
+Emitted when a gamepad axis moves past the 0.05 emit-deadzone since the last poll. Only fired when movement is significant enough to avoid noise flooding.
+
+<ParamField path="gamepad_id" type="int">
+  GLFW joystick/gamepad ID.
+</ParamField>
+
+<ParamField path="axis" type="int">
+  GLFW axis constant — one of `keel.GAMEPAD_AXIS_LEFT_X`, `GAMEPAD_AXIS_LEFT_Y`, `GAMEPAD_AXIS_RIGHT_X`, `GAMEPAD_AXIS_RIGHT_Y`, `GAMEPAD_AXIS_LEFT_TRIGGER`, `GAMEPAD_AXIS_RIGHT_TRIGGER`.
+</ParamField>
+
+<ParamField path="value" type="float">
+  Axis value in the range `[-1.0, 1.0]` (triggers: `[-1.0, 1.0]` at rest to fully pressed).
+</ParamField>
+
+```python
+for evt in world.read_events(keel.GamepadAxisEvent):
+    if evt.axis == keel.GAMEPAD_AXIS_LEFT_X:
+        set_player_horizontal(world, evt.value)
+```
+
+---
+
+## Built-in Physics Events
+
+Physics events are emitted by the `Physics2D` and `Physics3D` bridges during their `POST_UPDATE` step.
+
+---
+
+### `CollisionEvent2D`
+
+Emitted by `Physics2D` when two collidable shapes make contact during a physics tick.
+
+<ParamField path="entity_a" type="int">
+  First entity in the collision pair.
+</ParamField>
+
+<ParamField path="entity_b" type="int">
+  Second entity in the collision pair.
+</ParamField>
+
+<ParamField path="normal_x" type="float">
+  X component of the collision normal vector (points from B toward A).
+</ParamField>
+
+<ParamField path="normal_y" type="float">
+  Y component of the collision normal vector.
+</ParamField>
+
+<ParamField path="impulse" type="float">
+  Magnitude of the collision impulse applied to resolve the contact.
+</ParamField>
+
+```python
+@app.system(keel.Phase.POST_UPDATE, after=physics_step)
+def on_collision_2d(world, dt):
+    for evt in world.read_events(keel.CollisionEvent2D):
+        if world.has_component(evt.entity_a, Bullet):
+            world.despawn(evt.entity_a)
+            apply_damage(world, evt.entity_b, 10)
+```
+
+<Note>
+  `KINEMATIC` vs `KINEMATIC` bodies do not emit `CollisionEvent2D` due to pymunk callback semantics. Use `DYNAMIC` body type for entities that must detect collisions with each other.
+</Note>
+
+---
+
+### `CollisionEvent3D`
+
+Emitted by `Physics3D` when two bodies report a contact during a physics tick.
+
+<ParamField path="entity_a" type="int">
+  First entity in the contact pair.
+</ParamField>
+
+<ParamField path="entity_b" type="int">
+  Second entity in the contact pair.
+</ParamField>
+
+<ParamField path="contact_x" type="float">
+  X coordinate of the contact point in world space.
+</ParamField>
+
+<ParamField path="contact_y" type="float">
+  Y coordinate of the contact point in world space.
+</ParamField>
+
+<ParamField path="contact_z" type="float">
+  Z coordinate of the contact point in world space.
+</ParamField>
+
+<ParamField path="normal_x" type="float">
+  X component of the contact normal.
+</ParamField>
+
+<ParamField path="normal_y" type="float">
+  Y component of the contact normal.
+</ParamField>
+
+<ParamField path="normal_z" type="float">
+  Z component of the contact normal.
+</ParamField>
+
+```python
+@app.system(keel.Phase.POST_UPDATE)
+def on_collision_3d(world, dt):
+    for evt in world.read_events(keel.CollisionEvent3D):
+        if world.has_component(evt.entity_a, Projectile):
+            world.despawn(evt.entity_a)
+```
+
+---
+
+## Full Custom Event Example
+
+This example walks through defining a custom event type, emitting it from one system, and reading it in a downstream system within the same phase.
+
+**Step 1 — Define the event type:**
+
+```python
+import keel
+from dataclasses import field
+
+@keel.event
+class ItemPickedUp:
+    player_entity: int
+    item_name: str
+    value: int
+```
+
+**Step 2 — Emit from a collision handler:**
+
+```python
+@app.system(keel.Phase.POST_UPDATE, after=physics_step)
+def pickup_items(world, dt):
+    for evt in world.read_events(keel.CollisionEvent2D):
+        a, b = evt.entity_a, evt.entity_b
+
+        player, item = None, None
+        if world.has_component(a, Player) and world.has_component(b, Item):
+            player, item = a, b
+        elif world.has_component(b, Player) and world.has_component(a, Item):
+            player, item = b, a
+
+        if player is not None and item is not None:
+            item_data = world.get(item, Item)
+            world.emit(ItemPickedUp(
+                player_entity=player,
+                item_name=item_data["name"],
+                value=item_data["value"],
+            ))
+            world.despawn(item)
+```
+
+**Step 3 — React in a downstream system:**
+
+```python
+@app.system(keel.Phase.POST_UPDATE, after=pickup_items)
+def apply_pickup_rewards(world, dt):
+    for evt in world.read_events(ItemPickedUp):
+        world.set(evt.player_entity, Score,
+                  points=world.get(evt.player_entity, Score)["points"] + evt.value)
+        print(f"Player picked up {evt.item_name} (+{evt.value} pts)")
+```
+
+<Note>
+  Because `apply_pickup_rewards` declares `after=pickup_items`, the scheduler guarantees `pickup_items` has finished emitting `ItemPickedUp` events before `apply_pickup_rewards` starts reading them — even though both systems are in `POST_UPDATE`.
+</Note>
+
+---
+
+## Event Lifetime
+
+All event queues are cleared by `world.events.clear()`, which the run loop calls at the top of every visual frame before polling GLFW. This means:
+
+- Events emitted during frame N are **not** present in frame N+1.
+- Multiple **simulation ticks** within the same visual frame all share the same event queues — events emitted during tick 1 are still readable during tick 2.
+- `world.tick(dt)` (the headless manual driver) clears events at the **start** of each call, not the end.
+
+```python
+# Demonstration: events persist across multiple sim ticks within one frame
+world.emit(CustomEvent(value=42))
+world.scheduler.tick_simulation(world, keel.FIXED_DT)  # tick 1 — event visible
+world.flush()
+world.scheduler.tick_simulation(world, keel.FIXED_DT)  # tick 2 — event still visible
+world.flush()
+world.events.clear()  # now gone
+```

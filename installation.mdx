@@ -1,0 +1,139 @@
+---
+title: "Install Keel — Python Game Engine Setup Guide"
+sidebarTitle: "Installation"
+description: "Install Keel from PyPI using pip. Choose optional extras for 3D physics (pybullet) and developer tooling (ImGui). Requires Python 3.11+ and OpenGL 3.3."
+---
+
+Keel is distributed on PyPI under the name **`keelpy`**. The import name inside your code is `keel`. This distinction — PyPI name vs. import name — is the single most common source of confusion for new users, so keep it in mind as you work through this page. The rest of the install is a standard `pip` one-liner.
+
+## Requirements
+
+Before installing, make sure your environment meets both requirements:
+
+- **Python 3.11 or newer** — Keel uses modern type annotation syntax and relies on features introduced in 3.11.
+- **OpenGL 3.3 Core** — a GPU and driver that support OpenGL 3.3 Core Profile. This covers any discrete GPU from the last decade and most integrated graphics from Intel (Haswell, 2013+), AMD, and Apple Silicon via MoltenVK. Headless CI typically needs a software renderer such as Mesa's `llvmpipe`.
+
+<Steps>
+  <Step title="Install the base package">
+    The base install covers everything you need for 2D games: sprite rendering, 2D physics (pymunk), text, audio, tilemaps, and the CLI.
+
+    ```bash
+    pip install keelpy
+    ```
+
+    This pulls in the following transitive dependencies automatically:
+
+    | Package | Purpose |
+    |---|---|
+    | `numpy` | Component storage (structured arrays) |
+    | `moderngl` | OpenGL rendering backend |
+    | `glfw` | Window creation and input |
+    | `Pillow` | Image loading (PNG, JPG, BMP, TGA) |
+    | `watchdog` | Asset hot-reload file watcher |
+    | `pymunk` | 2D physics engine |
+    | `freetype-py` | Font rasterization |
+    | `miniaudio` | Audio playback |
+
+  </Step>
+  <Step title="Choose optional extras (if needed)">
+    Keel ships two optional extras for features that require heavier or platform-restricted dependencies.
+
+    <CodeGroup>
+      ```bash 3D Physics (pybullet)
+      pip install keelpy[physics3d]
+      ```
+
+      ```bash Dev Tooling (ImGui)
+      pip install keelpy[tools]
+      ```
+
+      ```bash Everything
+      pip install "keelpy[physics3d,tools]"
+      ```
+    </CodeGroup>
+
+    **`physics3d`** installs `pybullet>=3.2` for the 3D physics bridge (`setup_physics_3d`). pybullet currently has pre-built wheels on Windows and a few older Python/platform combinations only. On Linux and macOS it must be compiled from source, which requires a C++ toolchain.
+
+    **`tools`** installs `imgui-bundle>=1.5` for the ImGui-powered world inspector (F1), frame profiler overlay (F2), and physics debug draw (F3). Keel supports both the 1.5.x and 1.9x+ module layouts of `imgui-bundle`, so pip installs whichever wheel is available for your Python version.
+
+    <Warning>
+      **pybullet on macOS and Linux:** `keelpy[physics3d]` may attempt to compile pybullet from source on non-Windows platforms. If you do not need 3D physics, omit this extra — 2D physics via pymunk works everywhere and is included in the base install.
+    </Warning>
+
+  </Step>
+  <Step title="Verify the install">
+    Open a Python shell and confirm both the package and version are reachable:
+
+    ```python
+    import keel
+    print(keel.__version__)   # e.g. 0.8.5
+    ```
+
+    A successful print means the engine, renderer, and all base dependencies loaded correctly.
+
+  </Step>
+</Steps>
+
+## Install from Source
+
+If you want to contribute to Keel, use a pre-release build, or run the example scripts directly from the repository, install from a local clone:
+
+```bash
+git clone https://github.com/VKSFY/keel
+cd keel
+pip install -e .
+```
+
+The `-e` flag installs the package in *editable* mode, so changes you make to the source are immediately reflected without reinstalling. To include both optional extras when working from source:
+
+```bash
+pip install -e ".[physics3d,tools]"
+```
+
+Run the test suite to confirm everything is wired up correctly:
+
+```bash
+pytest
+```
+
+The suite covers every system phase and runs in seconds on a modern machine.
+
+## Platform Notes
+
+| Platform | Base install | `physics3d` | `tools` |
+|---|---|---|---|
+| Windows | ✅ | ✅ (pre-built wheels) | ✅ |
+| macOS | ✅ | ⚠️ Source build required | ✅ |
+| Linux | ✅ | ⚠️ Source build required | ✅ |
+
+<Warning>
+  **`import keel` fails with "No module named 'keel'"?** This almost always means you installed the wrong package name. The PyPI distribution is `keelpy`; the import is `keel`. Run:
+
+  ```bash
+  pip install keelpy
+  ```
+
+  Then in your code:
+
+  ```python
+  import keel  # correct — NOT "import keelpy"
+  ```
+
+  If you installed from a clone and still see the error, run `pip install -e .` from the repo root and check that no stray `keel.py` file is shadowing the package on your `PYTHONPATH`.
+</Warning>
+
+## Upgrading
+
+```bash
+pip install --upgrade keelpy
+```
+
+To upgrade with extras:
+
+```bash
+pip install --upgrade "keelpy[tools]"
+```
+
+<Note>
+  Keel follows semantic versioning. Patch releases (e.g. 0.8.4 → 0.8.5) are backward-compatible bug fixes. Minor releases may introduce new APIs; deprecated APIs are kept for at least one minor version before removal.
+</Note>

@@ -1,0 +1,331 @@
+---
+title: "Common Game Patterns in Keel"
+sidebarTitle: "Common Patterns"
+description: "Recurring patterns for Keel games: singleton components, side tables for non-numpy data, deferred despawn queues, entity ID tracking for collisions, and manual projectile physics."
+---
+
+Every non-trivial Keel game re-invents the same handful of solutions: a single component that holds top-level state, a plain Python dict next to the ECS for data that doesn't fit in numpy, a safe path for despawning during a collision, a set that lets collision events be classified in constant time, and a manual position loop for entities that move too fast for pymunk to track reliably. The patterns below are drawn directly from the Pong, Asteroids, and Platformer examples shipped with Keel. Reach for them before building your own infrastructure.
+
+<AccordionGroup>
+
+<Accordion title="Singleton components — spawn once, read anywhere">
+
+A singleton component is an ordinary `@keel.component` class of which exactly one entity will ever exist. It holds top-level game state: score, lives, wave number, game-over flag, and so on. Spawn it once at startup (before `app.run()`), then read it from any system with `world.query_one`.
+
+**Define and spawn**
+
+```python
+import keel
+
+@keel.component
+class GameState:
+    score: int = 0
+    lives: int = 3
+    game_over: bool = False
+
+# Spawn once at startup. Keep the entity id so you can write back later.
+gs_entity = app.world.spawn(GameState())
+app.world.flush()
+```
+
+**Read from any system**
+
+`world.query_one` returns a plain Python `dict` with scalar values — no `[0]` indexing required, no numpy type surprises.
+
+```python
+@app.system(keel.Phase.UPDATE)
+def hud_system(world, dt):
+    gs = world.query_one(GameState)
+    if gs is None:
+        return
+
+    print(gs['score'])      # plain int, not numpy.int64
+    if gs['game_over']:     # plain bool — works directly in `if`
+        show_game_over_screen()
+```
+
+**Write back with `world.set`**
+
+`query_one` is a read-only snapshot. To update fields, call `world.set` with the entity id you saved at spawn time.
+
+```python
+world.set(gs_entity, GameState, score=gs['score'] + 100)
+world.set(gs_entity, GameState, lives=2, game_over=False)
+```
+
+<Note>
+If you need to update many entities of the same component type in bulk (e.g., ticking down all bullet lifetimes at once), use `world.query(ComponentType)` and mutate the numpy column view in place: `bullets['lifetime'] -= dt`. `query_one` is only for singletons where you want plain Python scalars.
+</Note>
+
+The Asteroids example carries `score`, `lives`, `wave`, `game_over`, `respawn_timer`, `ship_alive`, and `restart_pending` all in one `GameState` singleton, which every system reads through `world.query_one(GameState)` and writes through `world.set(GS_ENTITY, GameState, ...)`.
+
+</Accordion>
+
+<Accordion title="Side tables for non-numpy data">
+
+Keel components are backed by numpy structured arrays. That means every field must be a numeric scalar or bool — no strings, no Python tuples, no dicts, no lists. When you need to store per-entity data that numpy cannot hold, use a module-level Python `dict` keyed by entity ID.
+
+This is the same pattern Keel uses internally for `TextLabel` text content (`set_text`, `get_text`, `clear_text` all delegate to a module-level dict keyed by entity id).
+
+**Example: bullet velocity**
+
+A bullet needs a constant `(vx, vy)` tuple for its entire lifetime. Tuples can't live inside a numpy structured array, so they go in `BULLET_VEL` beside the ECS:
+
+```python
+# Module-level side table — lives outside any class or function.
+BULLET_VEL: dict[int, tuple[float, float]] = {}
+
+def spawn_bullet(world, x: float, y: float, vx: float, vy: float) -> int:
+    eid = world.spawn(
+        keel.Transform2D(x=x, y=y),
+        keel.RigidBody2D(mass=0.1, body_type=keel.BodyType.DYNAMIC),
+        keel.Collider2D(
+            shape_type=keel.ShapeType2D.CIRCLE,
+            radius=3.0,
+            elasticity=0.0,
+            friction=0.0,
+        ),
+        Bullet(lifetime=3.0),
+    )
+    world.flush()            # allocate the id before storing it
+    BULLET_VEL[eid] = (vx, vy)
+    return eid
+```
+
+**Re-apply the velocity every frame**
+
+pymunk can perturb a body's velocity during its step. Re-push the stored value each `PRE_UPDATE` tick so the bullet maintains its constant heading:
+
+```python
+@app.system(keel.Phase.PRE_UPDATE)
+def apply_bullet_vel(world, dt):
+    for bid, (vx, vy) in list(BULLET_VEL.items()):
+        if world.is_alive(bid):
+            phys.set_velocity(bid, vx, vy)
+```
+
+**Clean up on despawn**
+
+<Warning>
+Always remove the side-table entry when the entity is despawned. If you forget, the dict grows without bound — every bullet that was ever fired keeps a stale entry mapped to a recycled entity id.
+</Warning>
+
+```python
+@app.system(keel.Phase.POST_UPDATE)
+def despawn_system(world, dt):
+    for eid in DESPAWN_QUEUE:
+        if world.is_alive(eid):
+            world.despawn(eid)
+            world.flush()
+        BULLET_VEL.pop(eid, None)   # safe even if key is absent
+    DESPAWN_QUEUE.clear()
+```
+
+The same pattern extends to any other non-numpy data: enemy patrol velocities (`ENEMY_VEL: dict[int, float]`), dialogue strings, animation frame sequences — anything that doesn't fit in a float or int column goes in a module-level dict and is cleaned up in the despawn path.
+
+</Accordion>
+
+<Accordion title="Deferred despawn queue — never despawn inside a query loop">
+
+`world.query()` returns numpy array views directly into the archetype's storage. Calling `world.despawn()` inside a query loop can invalidate those views mid-iteration, causing reads from freed memory or skipping rows silently. Always queue entity ids and process them in a dedicated system that runs after every query has finished.
+
+**The queue**
+
+```python
+DESPAWN_QUEUE: list[int] = []
+
+def queue_despawn(eid: int) -> None:
+    """Schedule an entity for destruction at end of frame (deduplicated)."""
+    if eid not in DESPAWN_QUEUE:
+        DESPAWN_QUEUE.append(eid)
+```
+
+**The despawn system**
+
+Register it in `Phase.POST_UPDATE` so it runs after all `UPDATE` and `POST_UPDATE` gameplay systems have finished iterating:
+
+```python
+@app.system(keel.Phase.POST_UPDATE)
+def despawn_system(world, dt):
+    for eid in DESPAWN_QUEUE:
+        if world.is_alive(eid):
+            world.despawn(eid)
+            world.flush()
+        # Clean up any side tables here too.
+        BULLET_VEL.pop(eid, None)
+        BULLET_ENTITIES.discard(eid)
+        ENEMY_ENTITIES.discard(eid)
+    DESPAWN_QUEUE.clear()
+```
+
+**Calling it from other systems**
+
+```python
+@app.system(keel.Phase.UPDATE)
+def bullet_lifetime(world, dt):
+    for arch in world.query(Bullet).archetypes():
+        n = arch.length
+        bs = arch.columns[Bullet][:n]
+        for i in range(n):
+            bs['lifetime'][i] -= dt
+            if bs['lifetime'][i] <= 0.0:
+                # Queue — never despawn here directly.
+                queue_despawn(int(arch.entities[i]))
+```
+
+<Note>
+`world.despawn` queues a command in Keel's internal `CommandBuffer`. The actual structural change only applies on the next `world.flush()`. The `DESPAWN_QUEUE` pattern adds a second layer of safety: it keeps you from even calling `world.despawn` while you are inside a numpy view, which could produce confusing double-free behaviour in edge cases.
+</Note>
+
+</Accordion>
+
+<Accordion title="Entity ID tracking for collision detection">
+
+`CollisionEvent2D` carries two entity IDs — `event.entity_a` and `event.entity_b` — but no component type information. There is no built-in "which archetype is this?" look up on a collision event. The naive fix is to call `world.has_component(a, Bullet)` for every event, which costs an `O(log n)` dict lookup per entity per event per frame.
+
+The idiomatic Keel solution is to maintain module-level sets that classify every entity at spawn time. Membership tests on a Python `set[int]` are `O(1)`:
+
+**Declare the tracking sets**
+
+```python
+BULLET_ENTITIES: set[int] = set()
+ENEMY_ENTITIES:  set[int] = set()
+```
+
+**Register at spawn time**
+
+```python
+def spawn_bullet(world, x, y, vx, vy):
+    eid = world.spawn(
+        keel.Transform2D(x=x, y=y),
+        keel.RigidBody2D(mass=0.1, body_type=keel.BodyType.DYNAMIC),
+        keel.Collider2D(shape_type=keel.ShapeType2D.CIRCLE, radius=3.0,
+                        elasticity=0.0, friction=0.0),
+        Bullet(),
+    )
+    world.flush()
+    BULLET_VEL[eid] = (vx, vy)
+    BULLET_ENTITIES.add(eid)   # classify immediately after flush
+    return eid
+
+def spawn_enemy(world, x, y):
+    eid = world.spawn(
+        keel.Transform2D(x=x, y=y),
+        keel.RigidBody2D(mass=1.0, body_type=keel.BodyType.DYNAMIC),
+        keel.Collider2D(shape_type=keel.ShapeType2D.CIRCLE, radius=16.0,
+                        elasticity=0.0, friction=0.0),
+        Enemy(),
+    )
+    world.flush()
+    ENEMY_ENTITIES.add(eid)    # classify immediately after flush
+    return eid
+```
+
+**O(1) dispatch in the collision system**
+
+`CollisionEvent2D` does not guarantee ordering — either body can be `entity_a`. Handle both orientations:
+
+```python
+@app.system(keel.Phase.POST_UPDATE)
+def collision_system(world, dt):
+    for event in world.read_events(keel.CollisionEvent2D):
+        a = int(event.entity_a)
+        b = int(event.entity_b)
+
+        # Guard against events arriving after a despawn this frame.
+        if not world.is_alive(a) or not world.is_alive(b):
+            continue
+
+        if a in BULLET_ENTITIES and b in ENEMY_ENTITIES:
+            handle_hit(world, bullet=a, enemy=b)
+        elif b in BULLET_ENTITIES and a in ENEMY_ENTITIES:
+            handle_hit(world, bullet=b, enemy=a)
+```
+
+**Clean up on despawn**
+
+Remove entries from the tracking sets in `despawn_system` so they don't accumulate stale IDs:
+
+```python
+@app.system(keel.Phase.POST_UPDATE)
+def despawn_system(world, dt):
+    for eid in DESPAWN_QUEUE:
+        if world.is_alive(eid):
+            world.despawn(eid)
+            world.flush()
+        BULLET_VEL.pop(eid, None)
+        BULLET_ENTITIES.discard(eid)   # safe even if not present
+        ENEMY_ENTITIES.discard(eid)
+    DESPAWN_QUEUE.clear()
+```
+
+The Asteroids example uses three sets — `SHIP_ENTITIES`, `BULLET_ENTITIES`, and `ASTEROID_ENTITIES` — to route all four collision pairs (bullet-vs-asteroid, ship-vs-asteroid, and their mirrors) in a single O(1) dispatch per event.
+
+</Accordion>
+
+<Accordion title="Manual ball / projectile physics">
+
+pymunk's continuous collision detection works well at modest speeds, but tunneling becomes visible past roughly 1500 px/s on a 60 Hz step: the ball moves more than its own diameter in one tick, and pymunk's broadphase misses the wall. For arcade games where correctness of every bounce matters more than realistic physics response, the recommended approach is to own the position math yourself and use Keel's physics bridge only for collision event detection.
+
+**The pattern**
+
+Keep velocity and position in a module-level dict (a side table, as described above). Each `PRE_UPDATE` tick, advance position, apply boundary reflections, then push the result into pymunk via `phys.set_position` and `phys.set_velocity`. pymunk still generates `CollisionEvent2D` on the next step, so your collision system works unchanged.
+
+```python
+# Module-level ball state — not on a component because position ownership
+# belongs to this system, not to pymunk.
+BALL_VEL = {'x': 300.0, 'y': 220.0}
+BALL_POS = {'x': 400.0, 'y': 300.0}
+
+BALL_RADIUS = 8.0
+WIDTH, HEIGHT = 800.0, 600.0
+
+@app.system(keel.Phase.PRE_UPDATE)
+def move_ball(world, dt):
+    # Advance position.
+    BALL_POS['x'] += BALL_VEL['x'] * dt
+    BALL_POS['y'] += BALL_VEL['y'] * dt
+
+    # Left / right boundary reflection.
+    if BALL_POS['x'] < BALL_RADIUS:
+        BALL_POS['x'] = BALL_RADIUS
+        BALL_VEL['x'] = abs(BALL_VEL['x'])
+    elif BALL_POS['x'] > WIDTH - BALL_RADIUS:
+        BALL_POS['x'] = WIDTH - BALL_RADIUS
+        BALL_VEL['x'] = -abs(BALL_VEL['x'])
+
+    # Top / bottom boundary reflection.
+    if BALL_POS['y'] < BALL_RADIUS:
+        BALL_POS['y'] = BALL_RADIUS
+        BALL_VEL['y'] = abs(BALL_VEL['y'])
+    elif BALL_POS['y'] > HEIGHT - BALL_RADIUS:
+        BALL_POS['y'] = HEIGHT - BALL_RADIUS
+        BALL_VEL['y'] = -abs(BALL_VEL['y'])
+
+    # Push results into pymunk so CollisionEvent2D still fires for paddle/wall hits.
+    phys.set_position(ball_entity, BALL_POS['x'], BALL_POS['y'])
+    phys.set_velocity(ball_entity, BALL_VEL['x'], BALL_VEL['y'])
+```
+
+**Why `phys.set_velocity` too?**
+
+pymunk integrates velocity into position during its own step. If you only push `set_position` without correcting `set_velocity`, pymunk will overwrite your position with its own integrated result on the very next step. Setting both makes pymunk's internal state agree with yours before the step runs.
+
+**When to use this pattern vs. pure pymunk**
+
+| Situation | Recommendation |
+|-----------|---------------|
+| Ball speed under ~1000 px/s, 60 Hz | Pure pymunk with `elasticity=1.0` |
+| Ball speed 1000–1500 px/s | Reduce `FIXED_DT` or clamp speed |
+| Ball speed above ~1500 px/s, or correctness-critical arcade game | Manual ball physics (this pattern) |
+| Bullet that simply needs to disappear on hit | Pure pymunk is fine; bullets are short-lived |
+
+<Warning>
+Do not use this pattern for entities subject to gravity or complex physical interactions. Once you take ownership of an entity's position, pymunk's gravity integration no longer applies to it. The pattern is designed for constant-velocity objects (balls, bullets) where you supply all the physics yourself.
+</Warning>
+
+The Pong example uses `phys.set_position` and `phys.set_velocity` in its `reset_timer_system` to relaunch the ball after a score, and the Asteroids example uses the same calls in `apply_asteroid_vel` and `apply_ship_vel` to re-assert velocity every frame over pymunk's own integration.
+
+</Accordion>
+
+</AccordionGroup>

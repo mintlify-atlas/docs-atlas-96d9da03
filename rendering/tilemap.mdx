@@ -1,0 +1,283 @@
+---
+title: "Tilemap Rendering with Chunked Baking"
+sidebarTitle: "Tilemap"
+description: "Keel's tilemap renderer bakes tile data into vertex buffers per chunk. Use setup_tilemap(app, tile_data) to register the tilemap and update tiles at runtime."
+---
+
+Keel's tilemap renderer is a static, chunk-baked layer that sits beneath the sprite pipeline. Instead of evaluating tile data every frame, it pre-bakes each 16×16 tile chunk into its own VAO and instance buffer at load time. The per-frame cost is one draw call per non-empty chunk, regardless of how many tiles that chunk contains.
+
+## How it Works
+
+At load time, `setup_tilemap` partitions the `tile_data` 2D array into 16×16-tile chunks. For each chunk it collects every non-zero tile, packs their world positions and atlas texture units into a numpy `float32` instance array, uploads it to a static GPU buffer, and stores the resulting VAO. On each frame the tilemap system issues `len(chunks)` draw calls before the sprite batcher runs.
+
+The tilemap shares the sprite shader and the same `TextureAtlas` used by `SpriteBatch2D`. Tile IDs map to atlas texture units with a simple offset: tile ID `N` samples from atlas slot `N - 1`. Tile ID `0` is always empty (no geometry is generated for it).
+
+## Prerequisites
+
+`setup_tilemap` requires `setup_renderer_2d` to have already been called on the same app, because the tilemap borrows the existing atlas and shader:
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d, setup_tilemap
+
+app = keel.App(title="Tilemap Demo", width=800, height=600)
+renderer = setup_renderer_2d(app)   # must come first
+```
+
+## Tile Data Format
+
+`tile_data` is a 2D NumPy `int32` array with shape `(rows, cols)`:
+
+- **`0`** — empty cell; no tile is rendered.
+- **`1`** — draws atlas slot 0 (the default white pixel).
+- **`N` (N ≥ 2)** — draws atlas slot `N - 1`.
+
+```python
+import numpy as np
+
+ROWS, COLS = 15, 20
+tile_data = np.zeros((ROWS, COLS), dtype=np.int32)
+
+# Tile ID 2 → atlas slot 1 (floor texture).
+# Tile ID 3 → atlas slot 2 (wall texture).
+TILE_FLOOR = 2
+TILE_WALL  = 3
+
+tile_data[1:ROWS-1, 1:COLS-1] = TILE_FLOOR   # interior floor
+tile_data[0, :]     = TILE_WALL               # top border
+tile_data[ROWS-1,:] = TILE_WALL               # bottom border
+tile_data[:, 0]     = TILE_WALL               # left border
+tile_data[:, COLS-1]= TILE_WALL               # right border
+```
+
+<Note>
+Atlas slot 0 is pre-occupied by the built-in 1×1 white pixel texture that Keel always registers first. Use `renderer.atlas.add_texture(key, texture)` or `renderer.atlas.load(path)` to add your own textures to slots 1, 2, 3, … and reference them as tile IDs 2, 3, 4, … respectively.
+</Note>
+
+## setup_tilemap
+
+```python
+tilemap_setup = setup_tilemap(
+    app,
+    tile_data,            # (rows, cols) int32 array
+    tile_width=32,        # tile width in pixels, default 32
+    tile_height=32,       # tile height in pixels, default 32
+)
+```
+
+Returns a `TilemapSetup` dataclass with one field:
+
+| Field | Type | Description |
+|---|---|---|
+| `tilemap` | `Tilemap` | The baked tilemap world resource. |
+
+`setup_tilemap` also registers a `Phase.PRE_RENDER` system that clears the framebuffer and renders every chunk before the sprite batcher runs. The sprite renderer detects the presence of this system and skips its own clear so the tile pixels survive into the sprite draw.
+
+The call is idempotent with respect to system registration — calling `setup_tilemap` a second time re-bakes the chunks against new tile data without registering a duplicate system.
+
+## Adding Tile Textures
+
+Before calling `setup_tilemap`, paint your tile textures into the atlas:
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d, setup_tilemap
+import numpy as np
+
+app = keel.App(title="Tilemap Demo", width=800, height=600)
+renderer = setup_renderer_2d(app)
+
+TILE = 32  # tile size in pixels
+
+# Hand-paint solid-colour textures and register them in the atlas.
+# add_texture returns the atlas slot index.
+floor_px = bytes((90, 70, 45, 255)) * (TILE * TILE)
+wall_px  = bytes((45, 45, 60, 255)) * (TILE * TILE)
+
+# Atlas slot 1 → tile ID 2 (floor)
+renderer.atlas.add_texture("floor", app.ctx.texture((TILE, TILE), 4, floor_px))
+# Atlas slot 2 → tile ID 3 (wall)
+renderer.atlas.add_texture("wall",  app.ctx.texture((TILE, TILE), 4, wall_px))
+```
+
+You can also load textures from disk:
+
+```python
+floor_id = renderer.atlas.load("assets/tiles/floor.png")  # returns atlas slot int
+# tile ID = floor_id + 1
+```
+
+## Chunked Baking Approach
+
+The 2D tile array is partitioned into 16×16-tile chunks (`CHUNK_SIZE = 16`). For each chunk:
+
+1. Non-zero tiles are identified with `np.argwhere`.
+2. Their world positions are computed as `(col_index * tile_width, row_index * tile_height)`.
+3. A `(count, 14)` float32 instance array is packed (same layout as the sprite batcher).
+4. A static GPU buffer is allocated and a VAO is built against the sprite shader.
+
+Chunks that are entirely empty (all zeros) produce no VAO and cost nothing at draw time. The total number of draw calls per frame equals the number of non-empty chunks.
+
+## Runtime Tile Updates
+
+To update tiles at runtime — for example, when a wall is destroyed or a door opens — modify the tile array and call `setup_tilemap` again with the updated data. The existing system registration is preserved; only the chunks are rebuilt:
+
+```python
+# Open a door at tile (5, 7).
+tile_data[5, 7] = 0          # 0 = empty
+setup_tilemap(app, tile_data, tile_width=TILE, tile_height=TILE)
+```
+
+<Warning>
+Re-calling `setup_tilemap` releases and rebuilds **all** chunk VAOs and GPU buffers. Do this only when the map actually changes (door open, block destroyed), not every frame. For animated tiles, drive the animation through atlas texture swaps rather than re-baking.
+</Warning>
+
+## Camera Follow
+
+The tilemap respects the same `Camera2D` as the sprite renderer — both read the active camera matrix through `get_active_camera_matrix`. Spawn a `Camera2D` and update its position to pan over large maps:
+
+```python
+camera_entity = app.world.spawn(
+    keel.Camera2D(x=320.0, y=240.0, zoom=1.0),
+)
+
+@app.system(keel.Phase.UPDATE)
+def follow_player(world, dt):
+    # Collect player position.
+    for transforms, _ in world.query(keel.Transform2D, Player):
+        for i in range(len(transforms)):
+            px = float(transforms["x"][i])
+            py = float(transforms["y"][i])
+
+    # Snap the camera.
+    world.set(camera_entity, keel.Camera2D, x=px, y=py)
+```
+
+## Full Example
+
+The example below is the full `tilemap_demo.py` that ships with Keel. It renders a 15×20 dungeon room with floor and wall tiles, a WASD-controllable player sprite on top, and a following camera.
+
+```python
+"""tilemap_demo.py — tilemap with a player sprite and follow camera."""
+
+import numpy as np
+import keel
+from keel.renderer import setup_renderer_2d, setup_tilemap
+
+WIDTH, HEIGHT = 800, 600
+TILE = 32
+ROWS, COLS = 15, 20
+SPEED = 220.0
+PLAYER_SIZE = 24.0
+
+TILE_ID_FLOOR = 2
+TILE_ID_WALL  = 3
+FLOOR_RGBA = (90, 70, 45, 255)
+WALL_RGBA  = (45, 45, 60, 255)
+
+# ---------------------------------------------------------------------------
+# Component
+# ---------------------------------------------------------------------------
+
+@keel.component
+class Player:
+    pass
+
+# ---------------------------------------------------------------------------
+# App + renderer + atlas textures
+# ---------------------------------------------------------------------------
+
+app = keel.App(title="Tilemap Demo", width=WIDTH, height=HEIGHT)
+renderer = setup_renderer_2d(app)
+
+# Paint two solid-colour tile textures into the atlas.
+# Atlas slot 0 = built-in white pixel (tile id 1).
+# Atlas slot 1 = floor  → tile id 2.
+# Atlas slot 2 = wall   → tile id 3.
+floor_px = bytes(FLOOR_RGBA) * (TILE * TILE)
+wall_px  = bytes(WALL_RGBA)  * (TILE * TILE)
+renderer.atlas.add_texture("floor", app.ctx.texture((TILE, TILE), 4, floor_px))
+renderer.atlas.add_texture("wall",  app.ctx.texture((TILE, TILE), 4, wall_px))
+
+# Build the tile array.
+tile_data = np.zeros((ROWS, COLS), dtype=np.int32)
+tile_data[1:ROWS-1, 1:COLS-1] = TILE_ID_FLOOR
+tile_data[0, :]     = TILE_ID_WALL
+tile_data[ROWS-1,:] = TILE_ID_WALL
+tile_data[:, 0]     = TILE_ID_WALL
+tile_data[:, COLS-1]= TILE_ID_WALL
+
+setup_tilemap(app, tile_data, tile_width=TILE, tile_height=TILE)
+
+# ---------------------------------------------------------------------------
+# Entities
+# ---------------------------------------------------------------------------
+
+app.world.spawn(
+    keel.Transform2D(x=COLS * TILE / 2.0, y=ROWS * TILE / 2.0),
+    keel.Sprite(texture_id=0, width=PLAYER_SIZE, height=PLAYER_SIZE,
+                r=1.0, g=0.7, b=0.3),
+    Player(),
+)
+
+camera = app.world.spawn(
+    keel.Camera2D(x=COLS * TILE / 2.0, y=ROWS * TILE / 2.0, zoom=1.0),
+)
+
+app.world.flush()
+
+# ---------------------------------------------------------------------------
+# Systems
+# ---------------------------------------------------------------------------
+
+@app.system(keel.Phase.UPDATE)
+def move_player(world, dt):
+    if app.input.is_key_down(keel.KEY_ESCAPE):
+        app.window.close()
+
+    right = 1.0 if app.input.is_key_down(keel.KEY_D) else 0.0
+    left  = 1.0 if app.input.is_key_down(keel.KEY_A) else 0.0
+    up    = 1.0 if app.input.is_key_down(keel.KEY_W) else 0.0
+    down  = 1.0 if app.input.is_key_down(keel.KEY_S) else 0.0
+
+    dx = right - left
+    dy = up - down
+
+    px = py = 0.0
+    for transforms, _ in world.query(keel.Transform2D, Player):
+        for i in range(len(transforms)):
+            transforms["x"][i] += dx * SPEED * dt
+            transforms["y"][i] += dy * SPEED * dt
+            px = float(transforms["x"][i])
+            py = float(transforms["y"][i])
+
+    # Follow camera.
+    for cameras in world.query(keel.Camera2D):
+        if len(cameras[0]) > 0:
+            cameras[0]["x"][0] = px
+            cameras[0]["y"][0] = py
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+app.run()
+```
+
+<Steps>
+  <Step title="Call setup_renderer_2d first">
+    The tilemap borrows the atlas and the sprite shader; `setup_renderer_2d` must be called before `setup_tilemap`.
+  </Step>
+  <Step title="Load tile textures into the atlas">
+    Call `renderer.atlas.add_texture(key, texture)` or `renderer.atlas.load(path)` for each tile appearance you need. Remember that atlas slot `N` is referenced as tile ID `N + 1`.
+  </Step>
+  <Step title="Build the tile_data array">
+    Create a 2D `int32` NumPy array. Use `0` for empty, and integer tile IDs for filled tiles.
+  </Step>
+  <Step title="Call setup_tilemap(app, tile_data)">
+    Bakes every non-empty 16×16 chunk into a GPU buffer and registers the PRE_RENDER system that draws them each frame.
+  </Step>
+  <Step title="Spawn sprites and a camera on top">
+    Sprite entities drawn by the RENDER-phase batcher appear above the tilemap layer automatically. Add a Camera2D to pan over large maps.
+  </Step>
+</Steps>

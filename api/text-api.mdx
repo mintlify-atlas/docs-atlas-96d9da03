@@ -1,0 +1,254 @@
+---
+title: "Text Module: Font Loading and Label Management"
+sidebarTitle: "Text API"
+description: "setup_text registers the text render system. load_font bakes a glyph atlas. Use set_text, get_text, clear_text, and set_label_visible to manage TextLabel content."
+---
+
+Keel's text system renders screen-space labels using freetype-py to bake glyph atlases into R8 GPU textures. Text is always drawn in **UI space** — it is not camera-transformed and does not scroll with the world. The system runs at `Phase.POST_RENDER`, after the 2D and 3D passes, so text always renders on top.
+
+The text system requires `setup_renderer_2d` to have been called first (the text shader draws into the same framebuffer the 2D renderer cleared).
+
+---
+
+## Setup
+
+### `setup_text`
+
+```python
+def setup_text(app: Any) -> TextSetup
+```
+
+Creates a `FontRegistry` and `TextBatch`, compiles the text shader, inserts them as world resources, and registers a `Phase.POST_RENDER` system that draws every visible `TextLabel` entity. Idempotent.
+
+**Requires:** `setup_renderer_2d(app)` must have been called first. Raises `RuntimeError` otherwise.
+
+**Requires:** freetype-py (`pip install freetype-py`).
+
+```python
+import keel
+
+app = keel.App()
+keel.setup_renderer_2d(app)
+text_setup = keel.setup_text(app)
+```
+
+#### `TextSetup` fields
+
+<ParamField path="font_registry" type="FontRegistry">
+  The `FontRegistry` inserted as a world resource. Call `font_registry.load(ctx, path, size_px)` to load fonts programmatically. Use `font_registry.id_of(font)` to get the integer ID for `TextLabel.font_id`.
+</ParamField>
+
+<ParamField path="text_batch" type="TextBatch">
+  The `TextBatch` renderer. Stores `last_glyph_count` and `last_draw_calls` for profiling. Not normally used directly.
+</ParamField>
+
+---
+
+## Loading fonts
+
+### `load_font`
+
+```python
+def load_font(
+    app: Any,
+    path: str,
+    size_px: int = 24,
+    name: Optional[str] = None,
+) -> Font
+```
+
+Load a TrueType or OpenType font through the world's `FontRegistry`. The font is baked into a 512×512 (or 1024×1024 on overflow) R8 glyph atlas covering ASCII printable + Latin-1 Supplement. Subsequent calls with the same `(path, size_px)` pair return the cached `Font` without re-baking.
+
+Requires `setup_text(app)` to have been called first. Raises `RuntimeError` otherwise.
+
+```python
+import keel
+
+# Load the built-in DejaVu Sans Mono at 28 px
+font = keel.load_font(app, keel.BUILTIN_FONT, size_px=28)
+font_id = text_setup.font_registry.id_of(font)
+
+# Spawn a label
+score_label = app.world.spawn(
+    keel.Transform2D(x=10.0, y=30.0),
+    keel.TextLabel(font_id=font_id, r=1.0, g=1.0, b=1.0),
+)
+keel.set_text(score_label, "Score: 0")
+```
+
+<ParamField path="app" type="Any">
+  The Keel `App` instance. The function looks up `FontRegistry` from `app.world`.
+</ParamField>
+
+<ParamField path="path" type="str">
+  File path to a `.ttf` or `.otf` font file. Pass `keel.BUILTIN_FONT` to use the bundled DejaVu Sans Mono.
+</ParamField>
+
+<ParamField path="size_px" type="int" default="24">
+  Pixel size at which to bake the glyph atlas. Larger values produce sharper text at large `TextLabel.scale` values but consume more atlas space. Raises `AtlasTooSmallError` if the glyphs don't fit in a 1024×1024 atlas at the requested size.
+</ParamField>
+
+<ParamField path="name" type="Optional[str]" default="None">
+  Optional alias for the font, accessible via `font_registry.get(name)`. Useful for referencing fonts by a logical name rather than a file path.
+</ParamField>
+
+**Returns:** A `Font` object. Pass it to `font_registry.id_of(font)` to get the `TextLabel.font_id` integer.
+
+---
+
+### `keel.BUILTIN_FONT`
+
+```python
+BUILTIN_FONT: str  # absolute path to bundled DejaVu Sans Mono .ttf
+```
+
+The absolute path to Keel's bundled DejaVu Sans Mono font, materialized at import time. Use this to load a font without requiring any external assets:
+
+```python
+font = keel.load_font(app, keel.BUILTIN_FONT, size_px=24)
+```
+
+---
+
+## Text content API
+
+Because `TextLabel` is a NumPy structured array component and NumPy does not support variable-length strings, the text string lives in a module-level side dictionary keyed by entity ID. These four functions are the public interface to that dictionary.
+
+### `set_text`
+
+```python
+def set_text(entity_id: int, text: str) -> None
+```
+
+Set or replace the text string for `entity_id`. The `TextBatch` reads this value each frame for any entity whose `TextLabel.visible` is `True` and whose `font_id` is valid.
+
+```python
+keel.set_text(score_entity, f"Score: {score}")
+```
+
+### `get_text`
+
+```python
+def get_text(entity_id: int) -> str
+```
+
+Return the current text content for `entity_id`. Returns `""` if `set_text` has never been called for this entity.
+
+```python
+current = keel.get_text(score_entity)
+```
+
+### `clear_text`
+
+```python
+def clear_text(entity_id: int) -> None
+```
+
+Remove the text entry for `entity_id` from the side table. After this call, `get_text(entity_id)` returns `""` and the `TextBatch` skips the entity. Use this when you despawn a label entity to reclaim the dictionary slot.
+
+```python
+keel.clear_text(old_label)
+world.despawn(old_label)
+```
+
+### `set_label_visible`
+
+```python
+def set_label_visible(world: Any, entity_id: int, visible: bool) -> None
+```
+
+Set `TextLabel.visible` on `entity_id` to `True` or `False`. When `False`, the `TextBatch` skips the entity entirely — no glyph layout, no GPU upload, no draw call for that entity. More efficient than setting `TextLabel.a = 0.0` because the CPU work is also skipped.
+
+```python
+keel.set_label_visible(app.world, hud_entity, False)   # hide
+keel.set_label_visible(app.world, hud_entity, True)    # show
+```
+
+---
+
+## The `Font` class
+
+`Font` is a loaded font face at a fixed pixel size with its glyph atlas already uploaded to the GPU. You normally receive it from `load_font` and don't construct it directly.
+
+### Properties
+
+<ParamField path="path" type="str">
+  The absolute path the font was loaded from.
+</ParamField>
+
+<ParamField path="size_px" type="int">
+  The pixel size passed at load time.
+</ParamField>
+
+<ParamField path="line_height" type="int">
+  Pixels to advance Y by for a newline, as reported by FreeType in pixels (converted from 26.6 fixed-point).
+</ParamField>
+
+<ParamField path="ascender" type="int">
+  Pixels above the baseline for the tallest glyph.
+</ParamField>
+
+<ParamField path="descender" type="int">
+  Pixels below the baseline (zero or negative).
+</ParamField>
+
+<ParamField path="space_advance" type="int">
+  Advance width of the space character in pixels. Used for tab expansion and as a fallback for missing glyphs.
+</ParamField>
+
+<ParamField path="atlas" type="GlyphAtlas">
+  The `GlyphAtlas` holding the R8 GPU texture and per-glyph UV metrics. Access `font.atlas.texture` for the `moderngl.Texture`.
+</ParamField>
+
+### `font.measure(text) -> tuple[float, float]`
+
+Return `(width, height)` in pixels for `text` at this font's size and `TextLabel.scale = 1.0`. Multi-line strings return the max line width and `line_height × line_count`. An empty string measures `(0, line_height)`.
+
+```python
+w, h = font.measure("Hello, world!")
+# Position a centered label
+label_x = (window_width - w) / 2
+```
+
+---
+
+## `AtlasTooSmallError`
+
+Raised by `Font.__init__` (via `GlyphAtlas.build`) when the requested character set does not fit in a 1024×1024 atlas. The remedy is to use a smaller `size_px`:
+
+```python
+try:
+    font = keel.load_font(app, "my_large_font.ttf", size_px=64)
+except keel.text.AtlasTooSmallError:
+    font = keel.load_font(app, "my_large_font.ttf", size_px=32)
+```
+
+---
+
+## Full example
+
+```python
+import keel
+
+app = keel.App(title="Text Demo", width=800, height=600)
+keel.setup_renderer_2d(app)
+text_setup = keel.setup_text(app)
+
+font = keel.load_font(app, keel.BUILTIN_FONT, size_px=28)
+font_id = text_setup.font_registry.id_of(font)
+
+score = 0
+score_entity = app.world.spawn(
+    keel.Transform2D(x=10.0, y=32.0),
+    keel.TextLabel(font_id=font_id, r=1.0, g=1.0, b=0.0),
+)
+keel.set_text(score_entity, "Score: 0")
+
+@app.system(keel.Phase.UPDATE)
+def update_score(world, dt):
+    global score
+    score += 1
+    keel.set_text(score_entity, f"Score: {score}")
+
+app.run()
+```

@@ -1,0 +1,237 @@
+---
+title: "Physics Module: setup_physics_2d and setup_physics_3d"
+sidebarTitle: "Physics API"
+description: "setup_physics_2d bridges pymunk for 2D physics. setup_physics_3d bridges pybullet for 3D. Both run at Phase.POST_UPDATE and write results back to Transform components."
+---
+
+Keel's physics layer is a thin ECS bridge: the `Physics2D` and `Physics3D` objects own the actual simulation (a pymunk `Space` and a pybullet DIRECT client, respectively). Every `Phase.POST_UPDATE` tick the bridge runs four phases in order:
+
+1. **`sync_to_physics`** — reads ECS components (`Transform2D/3D`, `RigidBody2D/3D`, `Collider2D/3D`) and creates, updates, or removes the corresponding physics objects.
+2. **`step(dt)`** — advances the solver by `dt` seconds.
+3. **`sync_from_physics`** — writes the solved positions and velocities back into the ECS structured arrays in-place.
+4. **`_emit_collisions`** — drains the collision buffer and calls `world.emit(CollisionEvent2D/3D(...))`.
+
+The ECS is the source of truth going *in*; the physics simulation is the source of truth coming *out*.
+
+---
+
+## 2D Physics
+
+### `setup_physics_2d`
+
+```python
+def setup_physics_2d(
+    app: Any,
+    gravity_x: float = 0.0,
+    gravity_y: float = -980.0,
+) -> Physics2D
+```
+
+Creates a `Physics2D` bridge, inserts it as a world resource, and registers the `Phase.POST_UPDATE` system. Idempotent — subsequent calls return the same `Physics2D` instance.
+
+**Requires:** pymunk (`pip install pymunk`).
+
+```python
+import keel
+
+app = keel.App()
+phys = keel.setup_physics_2d(app, gravity_y=-980.0)
+
+# Spawn a dynamic ball
+ball = app.world.spawn(
+    keel.Transform2D(x=400.0, y=500.0),
+    keel.RigidBody2D(mass=1.0, body_type=keel.BodyType.DYNAMIC),
+    keel.Collider2D(shape_type=keel.ShapeType2D.CIRCLE, radius=16.0),
+)
+
+# Spawn a static floor
+floor = app.world.spawn(
+    keel.Transform2D(x=400.0, y=50.0),
+    keel.RigidBody2D(body_type=keel.BodyType.STATIC),
+    keel.Collider2D(shape_type=keel.ShapeType2D.BOX, width=800.0, height=20.0),
+)
+```
+
+<ParamField path="app" type="App">
+  The Keel `App` instance. `setup_physics_2d` attaches the bridge to `app._keel_physics_2d` and wires a `Phase.POST_UPDATE` system.
+</ParamField>
+
+<ParamField path="gravity_x" type="float" default="0.0">
+  Horizontal gravity component in pixels/second². Typically `0.0` for standard top-down or side-scrolling games.
+</ParamField>
+
+<ParamField path="gravity_y" type="float" default="-980.0">
+  Vertical gravity in pixels/second². `-980.0` matches Earth gravity in centimeter-gram-second units (pymunk's default scale). Use `0.0` for top-down games.
+</ParamField>
+
+---
+
+### `Physics2D`
+
+`Physics2D` wraps a single pymunk `Space`. It is inserted as a world resource and can be injected into any system for imperative control.
+
+```python
+@app.system(keel.Phase.UPDATE)
+def player_jump(world, dt, phys: keel.Physics2D, input: keel.InputState):
+    if input.is_key_pressed(keel.KEY_SPACE):
+        phys.apply_impulse(player_entity, 0.0, 500.0)
+```
+
+#### Methods
+
+<ParamField path="set_velocity(entity_id, vel_x, vel_y)" type="method">
+  Overwrite the linear velocity of `entity_id`'s pymunk body. Also mirrors the new values into the `RigidBody2D` ECS component so the subsequent `sync_to_physics` does not revert the change. No-op if the entity has no physics body.
+
+  ```python
+  phys.set_velocity(player_entity, vel_x=0.0, vel_y=300.0)
+  ```
+</ParamField>
+
+<ParamField path="set_position(entity_id, x, y)" type="method">
+  Teleport the body to `(x, y)`. Also updates `Transform2D` in the ECS. Useful for kinematic platforms or respawn points. No-op if the entity has no physics body.
+
+  ```python
+  phys.set_position(player_entity, x=400.0, y=300.0)
+  ```
+</ParamField>
+
+<ParamField path="apply_impulse(entity_id, impulse_x, impulse_y)" type="method">
+  Apply a world-space impulse at the body's center of mass. Impulse = change in momentum (mass × Δvelocity). No-op if the entity has no physics body.
+
+  ```python
+  phys.apply_impulse(player_entity, 0.0, 500.0)  # jump
+  ```
+</ParamField>
+
+<ParamField path="apply_force(entity_id, force_x, force_y)" type="method">
+  Apply a continuous world-space force at the body's center of mass. Force is accumulated per-step (unlike impulse which is instantaneous). No-op if the entity has no physics body.
+</ParamField>
+
+<ParamField path="raycast_2d(start, end, radius)" type="method">
+  Perform a segment query in the pymunk space between `start` and `end` (each a `(float, float)` tuple). Returns a list of hit dictionaries sorted nearest-first by `alpha`, each containing:
+  - `entity_id: int` — the entity whose collider was hit
+  - `point: (float, float)` — world-space hit point
+  - `normal: (float, float)` — surface normal at the hit
+  - `alpha: float` — fraction along the segment `[0, 1]`
+
+  ```python
+  hits = phys.raycast_2d(start=(100.0, 300.0), end=(700.0, 300.0))
+  for hit in hits:
+      print(hit["entity_id"], hit["alpha"])
+  ```
+</ParamField>
+
+<ParamField path="cleanup()" type="method">
+  Remove every body and shape from the pymunk space. Called automatically by the app shutdown hook. Idempotent.
+</ParamField>
+
+---
+
+## 3D Physics
+
+### `setup_physics_3d`
+
+```python
+def setup_physics_3d(
+    app: Any,
+    gravity_y: float = -9.81,
+) -> Physics3D
+```
+
+Creates a `Physics3D` bridge backed by a pybullet DIRECT client (no GUI window), inserts it as a world resource, and registers the `Phase.POST_UPDATE` system. Idempotent.
+
+**Requires:** pybullet — install with `pip install keelpy[physics3d]`. Raises `ImportError` with instructions if pybullet is not installed.
+
+```python
+import keel
+
+app = keel.App()
+phys3d = keel.setup_physics_3d(app, gravity_y=-9.81)
+
+# A dynamic sphere
+app.world.spawn(
+    keel.Transform3D(x=0.0, y=5.0, z=-3.0),
+    keel.RigidBody3D(mass=1.0, body_type=keel.BodyType.DYNAMIC),
+    keel.Collider3D(shape_type=keel.ShapeType3D.SPHERE, radius=0.5),
+)
+
+# A static floor
+app.world.spawn(
+    keel.Transform3D(x=0.0, y=0.0, z=0.0),
+    keel.RigidBody3D(body_type=keel.BodyType.STATIC),
+    keel.Collider3D(shape_type=keel.ShapeType3D.BOX, size_x=50.0, size_y=0.1, size_z=50.0),
+)
+```
+
+<ParamField path="app" type="App">
+  The Keel `App` instance.
+</ParamField>
+
+<ParamField path="gravity_y" type="float" default="-9.81">
+  Vertical gravity in meters/second² (SI units). The bridge always sets `gravity_x = 0.0` and `gravity_z = 0.0`; only Y gravity is configurable through `setup_physics_3d`.
+</ParamField>
+
+---
+
+### `Physics3D`
+
+`Physics3D` wraps a single pybullet DIRECT-mode client. It is inserted as a world resource and can be injected into systems.
+
+<Note>
+  pybullet uses fixed substeps internally (`_FIXED_DT = 1/240 s`, up to `_MAX_SUBSTEPS = 10` per tick). The `step(dt)` method forwards the frame delta; pybullet accumulates it and steps in fixed increments.
+</Note>
+
+#### Methods
+
+<ParamField path="set_velocity(entity_id, vel_x, vel_y, vel_z)" type="method">
+  Overwrite the linear velocity of `entity_id`'s pybullet body and mirror the values into the `RigidBody3D` ECS component. No-op if the entity has no physics body.
+</ParamField>
+
+<ParamField path="set_position(entity_id, x, y, z)" type="method">
+  Teleport the body to `(x, y, z)` and update `Transform3D` in the ECS. No-op if the entity has no physics body.
+</ParamField>
+
+<ParamField path="apply_impulse(entity_id, impulse_x, impulse_y, impulse_z)" type="method">
+  Apply a world-space impulse at the body's center of mass. No-op if the entity has no physics body.
+</ParamField>
+
+<ParamField path="disconnect()" type="method">
+  Disconnect the pybullet client. Called automatically by the app shutdown hook. Idempotent.
+</ParamField>
+
+---
+
+## Integration flow
+
+<Steps>
+  <Step title="ECS in → physics objects">
+    `sync_to_physics` walks all archetypes that have `(Transform2D/3D, RigidBody2D/3D, Collider2D/3D)`. New entities create bodies and shapes. Entities whose `body_type` changed are rebuilt. Removed entities are cleaned up.
+  </Step>
+  <Step title="Simulation step">
+    `step(dt)` advances the solver. pymunk uses a single fixed `dt` per call; pybullet subdivides into `_FIXED_DT`-sized substeps.
+  </Step>
+  <Step title="Physics out → ECS">
+    `sync_from_physics` writes the solved `position`, `angle` (2D) or `position`, `orientation` (3D) back into the `Transform` and `RigidBody` structured arrays **in-place**. STATIC bodies are skipped.
+  </Step>
+  <Step title="Collision events">
+    `_emit_collisions` drains the callback buffer accumulated during `step` and calls `world.emit(CollisionEvent2D/3D(...))` for each contact.
+  </Step>
+</Steps>
+
+---
+
+## Reading collision events
+
+```python
+@app.system(keel.Phase.UPDATE)
+def on_collision(world, dt):
+    for event in world.read_events(keel.CollisionEvent2D):
+        if event.entity_a == player_id or event.entity_b == player_id:
+            other = event.entity_b if event.entity_a == player_id else event.entity_a
+            print(f"Player collided with entity {other}, impulse={event.impulse:.2f} N")
+
+@app.system(keel.Phase.UPDATE)
+def on_collision_3d(world, dt):
+    for event in world.read_events(keel.CollisionEvent3D):
+        print(f"3D collision at ({event.contact_x:.1f}, {event.contact_y:.1f}, {event.contact_z:.1f})")
+```

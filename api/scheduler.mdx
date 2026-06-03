@@ -1,0 +1,283 @@
+---
+title: "Scheduler — Phase-Ordered System Runner"
+sidebarTitle: "Scheduler"
+description: "The Scheduler runs systems in phase order each tick, injects typed resources, and supports within-phase ordering via the after parameter. Access via app.scheduler or world.scheduler."
+---
+
+The `Scheduler` owns all registered system functions and invokes them in `Phase` order every tick. `App` and `World` share a single `Scheduler` instance — systems registered through either `@app.system(...)` or `@world.system(...)` land in the same registry and run in the same order. You rarely construct a `Scheduler` directly; access the shared one through `app.scheduler` or `world.scheduler`.
+
+```python
+import keel
+
+app = keel.App()
+
+@app.system(keel.Phase.UPDATE)
+def physics(world, dt):
+    ...
+
+@app.system(keel.Phase.UPDATE, after=physics)
+def apply_forces(world, dt):
+    # Guaranteed to run after `physics` in every UPDATE tick
+    ...
+
+app.run()
+```
+
+---
+
+## Resource Injection
+
+Beyond the mandatory `world` and `dt` arguments, a system may declare additional parameters with type annotations. The `Scheduler` resolves each annotated parameter by looking up the corresponding type in `world._resources` at call time.
+
+```python
+@app.system(keel.Phase.RENDER)
+def draw(world, dt, renderer: keel.Renderer2DSetup, cam: keel.Camera2D):
+    # `renderer` and `cam` are injected from world resources automatically
+    renderer.draw_sprites(world)
+```
+
+<Note>
+  Every extra parameter **must** have a type annotation. A parameter without an annotation raises `TypeError` at registration time — not at runtime — so misconfigured systems fail immediately when the decorator is applied.
+</Note>
+
+---
+
+## Methods
+
+### `Scheduler.register(phase, fn, after=None)`
+
+Register `fn` to run during `phase`. The scheduler inspects the function signature to discover resource types, then topologically re-sorts the phase list to respect `after` dependencies.
+
+<ParamField path="phase" type="keel.Phase" required>
+  The execution phase. One of `PRE_UPDATE`, `UPDATE`, `POST_UPDATE`, `PRE_RENDER`, `RENDER`, `POST_RENDER`.
+</ParamField>
+
+<ParamField path="fn" type="Callable" required>
+  The system function. Its first two parameters should be `world` (World) and `dt` (float). Any additional annotated parameters are treated as resource injections.
+</ParamField>
+
+<ParamField path="after" type="Callable | list[Callable] | tuple[Callable, ...] | None" default="None">
+  One system function or a list/tuple of functions that must run before `fn` within the **same** phase. Raises `ValueError` if:
+  - Any listed function is registered in a different phase (cross-phase `after` is forbidden).
+  - Any listed function has not been registered yet.
+  - Adding the dependency would create a cycle.
+
+  On a validation error the new registration is rolled back and the scheduler stays consistent.
+</ParamField>
+
+```python
+scheduler = app.scheduler
+
+def early(world, dt): ...
+def late(world, dt): ...
+
+scheduler.register(keel.Phase.UPDATE, early)
+scheduler.register(keel.Phase.UPDATE, late, after=early)
+
+# late always runs after early in UPDATE
+```
+
+**Cross-phase `after` is rejected:**
+
+```python
+scheduler.register(keel.Phase.PRE_UPDATE, pre_fn)
+
+# ValueError — pre_fn is in PRE_UPDATE, not UPDATE
+scheduler.register(keel.Phase.UPDATE, update_fn, after=pre_fn)
+```
+
+---
+
+### `Scheduler.systems(phase) -> list[Callable]`
+
+Return the ordered list of registered system functions for `phase`. The order reflects the topological sort derived from `after` dependencies, stable on registration order for independent systems.
+
+<ParamField path="phase" type="keel.Phase" required>
+  The phase to query.
+</ParamField>
+
+<ResponseField name="returns" type="list[Callable]">
+  Functions registered in `phase`, in execution order.
+</ResponseField>
+
+```python
+fns = app.scheduler.systems(keel.Phase.UPDATE)
+print([f.__name__ for f in fns])
+```
+
+---
+
+### `Scheduler.clear()`
+
+Remove all registered systems from every phase and clear all ordering metadata. Useful in tests that build and tear down multiple schedulers within the same process.
+
+```python
+app.scheduler.clear()
+assert app.scheduler.systems(keel.Phase.UPDATE) == []
+```
+
+---
+
+### `Scheduler.run(world, dt)`
+
+Invoke every system once, iterating phases in `IntEnum` order (`PRE_UPDATE → UPDATE → POST_UPDATE → PRE_RENDER → RENDER → POST_RENDER`). Within each phase, systems run in topological (then registration) order.
+
+<ParamField path="world" type="World" required>
+  The world to pass as the first argument to each system.
+</ParamField>
+
+<ParamField path="dt" type="float" required>
+  Delta time to pass as the second argument to each system.
+</ParamField>
+
+```python
+# Manual tick — equivalent to world.tick() but without event clearing or flush
+app.scheduler.run(app.world, keel.FIXED_DT)
+```
+
+---
+
+### `Scheduler.tick(world, dt)`
+
+Alias for `run()`. Provided for symmetry with `world.tick()`.
+
+---
+
+### `Scheduler.tick_simulation(world, dt)`
+
+Run only the **simulation phases**: `PRE_UPDATE`, `UPDATE`, `POST_UPDATE`. Used by the run loop's `FixedStepDriver` to advance the simulation at a fixed 60 Hz rate independently of the display frame rate.
+
+<ParamField path="world" type="World" required>
+  The world passed to each system.
+</ParamField>
+
+<ParamField path="dt" type="float" required>
+  Fixed simulation delta — always `keel.FIXED_DT` (1/60 s) from the run loop.
+</ParamField>
+
+```python
+# The run loop calls this internally; shown here for clarity:
+scheduler.tick_simulation(world, keel.FIXED_DT)
+world.flush()
+```
+
+---
+
+### `Scheduler.tick_render(world, dt)`
+
+Run only the **render phases**: `PRE_RENDER`, `RENDER`, `POST_RENDER`. Called once per visual frame with the real elapsed wall-clock time so render systems can interpolate smoothly between simulation ticks.
+
+<ParamField path="world" type="World" required>
+  The world passed to each system.
+</ParamField>
+
+<ParamField path="dt" type="float" required>
+  Real elapsed frame time — may differ from `FIXED_DT` depending on display refresh rate.
+</ParamField>
+
+---
+
+### `Scheduler.tick_phases(world, dt, phases)`
+
+Invoke systems for an arbitrary ordered sequence of phases. Powers both `tick_simulation` and `tick_render` internally. Use this for custom execution splits (e.g. running only `RENDER` and `POST_RENDER` in a secondary render thread).
+
+<ParamField path="world" type="World" required>
+  The world passed to each system.
+</ParamField>
+
+<ParamField path="dt" type="float" required>
+  Delta time passed to each system.
+</ParamField>
+
+<ParamField path="phases" type="Iterable[Phase]" required>
+  The phases to run, in the order you want them invoked.
+</ParamField>
+
+```python
+# Run only UPDATE and POST_UPDATE
+scheduler.tick_phases(world, dt, (keel.Phase.UPDATE, keel.Phase.POST_UPDATE))
+```
+
+---
+
+### `Scheduler.attach_profiler(profiler)`
+
+Wrap every system invocation in `profiler.begin(name)` / `profiler.end(name)` timing calls. The profiler is also notified for the special `"__frame__"` marker from the run loop.
+
+<ParamField path="profiler" type="Any" required>
+  An object with `begin(name: str)` and `end(name: str)` methods. Use `keel.setup_profiler(app)` to get the built-in frame profiler.
+</ParamField>
+
+```python
+tools = keel.dev_tools(app)
+# tools.profiler is already attached via setup_profiler(app)
+```
+
+---
+
+### `Scheduler.detach_profiler()`
+
+Stop forwarding system timings. Useful when toggling the profiler at runtime.
+
+```python
+app.scheduler.detach_profiler()
+```
+
+---
+
+## Execution Model
+
+The diagram below shows how the run loop orchestrates `FixedStepDriver` and the `Scheduler` each visual frame:
+
+<Steps>
+  <Step title="Clear Events">
+    `world.events.clear()` — drop all events from the previous frame.
+  </Step>
+  <Step title="Poll Input">
+    `input_state.begin_frame()` then `window.swap_and_poll()` — GLFW callbacks fire here, pushing new `KeyEvent`, `MouseMoveEvent`, etc. into the event bus.
+  </Step>
+  <Step title="Simulation Ticks (0..N)">
+    `FixedStepDriver.step()` drains the accumulator by calling `scheduler.tick_simulation(world, FIXED_DT)` and `world.flush()` for each 1/60 s interval that has elapsed since the last frame.
+  </Step>
+  <Step title="Render Tick (1×)">
+    `scheduler.tick_render(world, elapsed)` runs once with the true wall-clock frame time. Render systems read `RenderState.alpha` for sub-tick interpolation.
+  </Step>
+</Steps>
+
+---
+
+## Common Patterns
+
+**Strict ordering within a phase:**
+
+```python
+@app.system(keel.Phase.POST_UPDATE)
+def integrate_physics(world, dt): ...
+
+@app.system(keel.Phase.POST_UPDATE, after=integrate_physics)
+def sync_transforms(world, dt): ...
+
+@app.system(keel.Phase.POST_UPDATE, after=sync_transforms)
+def update_camera(world, dt): ...
+```
+
+**Resource injection with multiple dependencies:**
+
+```python
+@app.system(keel.Phase.RENDER)
+def render_scene(
+    world, dt,
+    renderer: keel.Renderer3DSetup,
+    cam: keel.Camera3D,
+):
+    # Both resources injected automatically
+    ...
+```
+
+**Inspecting registered systems:**
+
+```python
+for phase in keel.Phase:
+    names = [f.__name__ for f in app.scheduler.systems(phase)]
+    print(f"{phase.name}: {names}")
+```

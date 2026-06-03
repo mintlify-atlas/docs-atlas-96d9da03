@@ -1,0 +1,307 @@
+---
+title: "Archetype ECS: Keel's Data Model"
+sidebarTitle: "ECS"
+description: "Keel's archetype ECS stores components in numpy structured arrays per archetype. Queries return column views for vectorized in-place mutation across all entities."
+---
+
+Keel's entire data model is an archetype-based Entity Component System (ECS). Every piece of game state — a player's position, a bullet's velocity, a score counter — lives in a component attached to an entity. The ECS groups entities by their exact component types into **archetypes**, which store data in numpy structured arrays laid out column-by-column. This means hot loops over thousands of entities become vectorized numpy operations, not Python `for` loops over individual objects.
+
+---
+
+## Components
+
+A component is a plain Python class annotated with `@keel.component`. The decorator inspects the class fields and, when every field maps to a numpy-compatible type (`float`, `int`, or `bool`), builds a numpy `dtype` for the component's structured array column.
+
+```python
+import keel
+
+@keel.component
+class Position:
+    x: float = 0.0
+    y: float = 0.0
+
+@keel.component
+class Velocity:
+    x: float = 0.0
+    y: float = 0.0
+
+@keel.component
+class Health:
+    hp: int = 100
+    max_hp: int = 100
+    invincible: bool = False
+```
+
+Field types map to numpy dtypes as follows:
+
+| Python annotation | numpy dtype   |
+|-------------------|---------------|
+| `float`           | `float64`     |
+| `int`             | `int64`       |
+| `bool`            | `bool_`       |
+| `np.float32`      | `float32`     |
+| `np.int32`        | `int32`       |
+
+If any field on the class uses a type that cannot be expressed as a numpy dtype (a `str`, `tuple`, or `dict`, for example), the entire component falls back to a plain Python list column. The component is still valid; it just loses the vectorized-mutation benefit.
+
+<Tip>
+Always use `float`, `int`, or `bool` annotations for hot-path components like `Transform2D` or `Velocity`. Reserve non-numpy fields for components that are read infrequently (names, colours, configuration), or store them in a side table instead.
+</Tip>
+
+---
+
+## Archetypes
+
+An **archetype** is the set of component types shared by a group of entities. Two entities that both have `Position` and `Velocity` live in the same archetype. An entity that also adds `Health` moves to a different archetype — `{Position, Velocity, Health}`.
+
+Each archetype owns one column per component type: a numpy structured array (or Python list) sized to the number of entities currently in that archetype. Rows are added on spawn and removed via swap-remove on despawn, so the array stays compact and cache-friendly.
+
+```
+Archetype {Position, Velocity}
+  positions:  np.ndarray[{'x': float64, 'y': float64}]  — one row per entity
+  velocities: np.ndarray[{'x': float64, 'y': float64}]  — one row per entity
+
+Archetype {Position, Velocity, Health}
+  positions:  np.ndarray[{'x': float64, 'y': float64}]
+  velocities: np.ndarray[{'x': float64, 'y': float64}]
+  healths:    np.ndarray[{'hp': int64, 'max_hp': int64, 'invincible': bool_}]
+```
+
+You never create or manage archetypes directly. The `ArchetypeRegistry` inside `World` creates them automatically the first time a new component-type combination appears.
+
+---
+
+## Spawning Entities
+
+`world.spawn(*components)` allocates a fresh entity ID and queues a deferred spawn command. It returns the integer entity ID immediately — but the entity does not appear in queries until `world.flush()` runs.
+
+```python
+# Spawn a moving entity.
+enemy = app.world.spawn(
+    Position(x=200.0, y=150.0),
+    Velocity(x=-50.0, y=0.0),
+    Health(hp=30, max_hp=30),
+)
+
+# The entity ID is available right away.
+print(enemy)  # e.g. 3
+
+# The entity is NOT yet visible to world.query(). Flush to commit.
+app.world.flush()
+```
+
+<Note>
+The main loop calls `world.flush()` automatically at the end of every frame. Inside systems you can safely call `world.spawn()` without an immediate flush — the entity appears on the next frame. If you need it to appear within the same code path (for example, during startup), call `world.flush()` explicitly.
+</Note>
+
+Passing duplicate component types to `spawn()` raises `ValueError` immediately:
+
+```python
+# ValueError: Duplicate component Position in spawn()
+app.world.spawn(Position(), Position())
+```
+
+---
+
+## Querying
+
+`world.query(*args)` returns a `QueryResult` that yields one tuple of **column views** per matching archetype. Iteration is once per archetype, not once per entity.
+
+```python
+@app.system(keel.Phase.UPDATE)
+def move(world, dt):
+    for pos, vel in world.query(Position, Velocity):
+        # pos and vel are numpy structured-array slices — the full column.
+        pos['x'] += vel['x'] * dt
+        pos['y'] += vel['y'] * dt
+```
+
+The loop body runs once per archetype that contains both `Position` and `Velocity`. Each `pos` and `vel` slice covers every entity in that archetype simultaneously, so the `+=` is a vectorized numpy operation rather than a Python loop.
+
+### Query modifiers
+
+<CardGroup cols={2}>
+  <Card title="Without[C]" icon="ban">
+    Exclude archetypes that contain component `C`. Use this to skip entities with a particular tag or flag.
+    ```python
+    world.query(Position, Without[Frozen])
+    ```
+  </Card>
+  <Card title="Optional[D]" icon="circle-question">
+    Include the column if the archetype has `D`, otherwise yield `None` in that position.
+    ```python
+    world.query(Position, Optional[Health])
+    ```
+  </Card>
+</CardGroup>
+
+Combined example:
+
+```python
+@app.system(keel.Phase.UPDATE)
+def update_entities(world, dt):
+    for pos, vel, health in world.query(
+        Position,
+        Velocity,
+        Without[Frozen],
+        keel.Optional[Health],
+    ):
+        pos['x'] += vel['x'] * dt
+        pos['y'] += vel['y'] * dt
+
+        # health is None if this archetype has no Health component.
+        if health is not None:
+            # Clamp hp in place.
+            health['hp'] = health['hp'].clip(0, health['max_hp'])
+```
+
+---
+
+## In-Place Mutation
+
+Column views from `world.query()` are numpy array slices. Writing to them mutates ECS storage directly — no copy, no write-back step needed.
+
+```python
+for pos, vel in world.query(Position, Velocity):
+    # Vectorized: applies to every entity in this archetype at once.
+    pos['x'] += vel['x'] * dt
+    pos['y'] += vel['y'] * dt
+```
+
+To modify a single entity's row within a query, index into the column:
+
+```python
+for pos, vel in world.query(Position, Velocity):
+    # Mutate row 0 only.
+    pos['x'][0] += 10.0
+```
+
+<Warning>
+Do **not** reassign a column variable (`pos = something_else`). That rebinds the local name without writing back to ECS storage. Always mutate the view in place using `pos['x'] += ...` or `pos['x'][i] = ...`.
+</Warning>
+
+---
+
+## Singleton Reads: `query_one`
+
+For components where exactly one entity holds that component (a `GameState`, a `Camera2D`, a level config), use `world.query_one(ComponentType)`. It returns the first matching entity's fields as a plain Python `dict` with scalar values — no `[0]` indexing, no numpy type coercions.
+
+```python
+@keel.component
+class GameState:
+    score: int = 0
+    lives: int = 3
+    game_over: bool = False
+
+# Spawn once during setup.
+app.world.spawn(GameState())
+app.world.flush()
+
+# Read anywhere — returns plain Python scalars.
+gs = app.world.query_one(GameState)
+if gs is not None:
+    print(gs['score'])    # plain int
+    if gs['game_over']:   # plain bool, works in if
+        restart()
+```
+
+<Note>
+`query_one` is **read-only**. The returned dict is a snapshot; mutating it does not write back to the ECS. To update fields, use `world.set(entity_id, GameState, score=42)` or iterate via `world.query(GameState)` for in-place bulk mutation.
+</Note>
+
+---
+
+## Per-Entity Reads and Writes
+
+For one-off access to a specific entity (a player paddle, a named UI label), use `world.get` and `world.set`.
+
+```python
+# Read fields as a plain dict — returns None if the entity lacks the component.
+pos = app.world.get(player, Position)
+if pos:
+    print(pos['x'], pos['y'])
+
+# Write specific fields in place — returns False if the entity lacks the component.
+app.world.set(player, Position, x=400.0, y=300.0)
+app.world.set(enemy, Health, hp=0)
+```
+
+`world.set` raises `ValueError` if a keyword argument names a field that does not exist on the component.
+
+---
+
+## Checking Entity State
+
+```python
+# True if the entity has been flushed and is in an archetype.
+app.world.is_alive(entity)
+
+# True if the entity is alive and currently has the component.
+app.world.has_component(entity, Position)
+```
+
+---
+
+## Deferred Structural Changes
+
+All operations that change an entity's component set are **deferred** — they queue a command and apply it only when `world.flush()` runs.
+
+| Method | What it defers |
+|---|---|
+| `world.spawn(*components)` | Allocate ID + insert into archetype |
+| `world.despawn(entity)` | Remove from archetype + free ID |
+| `world.add_component(entity, component)` | Migrate entity to new archetype |
+| `world.remove_component(entity, type)` | Migrate entity to smaller archetype |
+
+This keeps query iteration stable for the entire frame. You can spawn or despawn entities from inside a system without invalidating the column views you are iterating.
+
+```python
+DESPAWN_QUEUE: list[int] = []
+
+@app.system(keel.Phase.UPDATE)
+def mark_dead(world, dt):
+    for health, in world.query(Health):
+        for i, eid in enumerate(world.query(Health).entities()):
+            if health['hp'][i] <= 0:
+                DESPAWN_QUEUE.append(eid)
+
+@app.system(keel.Phase.POST_UPDATE)
+def flush_dead(world, dt):
+    for eid in DESPAWN_QUEUE:
+        if world.is_alive(eid):
+            world.despawn(eid)
+    DESPAWN_QUEUE.clear()
+    # flush() is called automatically at end-of-frame by the main loop.
+```
+
+---
+
+## Side-Table Pattern for Non-Numpy Data
+
+Components cannot store strings, tuples, or arbitrary objects — those types are not expressible as numpy dtypes. The conventional workaround is a module-level dict keyed by entity ID.
+
+```python
+# Module-level side table.
+ENTITY_NAMES: dict[int, str] = {}
+
+@keel.component
+class Named:
+    """Marker: this entity has a name in ENTITY_NAMES."""
+    dummy: int = 0  # at least one numpy field required
+
+npc = app.world.spawn(Position(x=100.0, y=200.0), Named())
+app.world.flush()
+ENTITY_NAMES[npc] = "Guard Captain"
+
+# Read in a system.
+@app.system(keel.Phase.UPDATE)
+def show_names(world, dt):
+    for named, in world.query(Named):
+        pass  # iterate entities via world.query(Named).entities()
+    for eid in world.query(Named).entities():
+        print(ENTITY_NAMES.get(eid, "?"))
+```
+
+<Warning>
+Always delete the side-table entry in your despawn path. Otherwise the dict grows unboundedly as entities are recycled.
+</Warning>

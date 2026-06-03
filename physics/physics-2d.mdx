@@ -1,0 +1,387 @@
+---
+title: "2D Physics with pymunk: Rigid Bodies and Collisions"
+sidebarTitle: "Physics 2D"
+description: "Keel's 2D physics bridges pymunk. Use setup_physics_2d to enable gravity, spawn RigidBody2D and Collider2D entities, and read CollisionEvent2D in systems."
+---
+
+Keel's 2D physics layer is a thin, ECS-first bridge over [pymunk](http://www.pymunk.org/) (Chipmunk2D). You describe bodies and shapes as plain ECS components, and the bridge keeps pymunk in sync automatically: every frame it reads your component data into pymunk, advances the simulation, and writes the results back into `Transform2D`. No pymunk objects ever appear in game code — only Keel components and events do.
+
+## Setting up physics
+
+Call `setup_physics_2d` once, immediately after creating your `App`. It registers a `physics_2d_system` at `Phase.POST_UPDATE` and returns the `Physics2D` bridge object in case you need direct control later.
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+from keel.physics import setup_physics_2d
+
+app = keel.App(title="My Game", width=800, height=600)
+setup_renderer_2d(app)
+phys = setup_physics_2d(app, gravity_y=-980.0)
+```
+
+`setup_physics_2d` is idempotent — a second call returns the existing bridge without registering a duplicate system. The function signature is:
+
+```python
+setup_physics_2d(app, gravity_x=0.0, gravity_y=-980.0) -> Physics2D
+```
+
+<Note>
+  The default gravity of `-980.0` is in **pixels per second squared**, matching a screen where y increases upward. Adjust to taste — some games use `-200.0` for floaty feel.
+</Note>
+
+## Components
+
+Every physics entity needs exactly three components: `Transform2D` for position, `RigidBody2D` for body parameters, and `Collider2D` for shape parameters. Missing any one of them prints a one-time `RuntimeWarning` and skips the entity.
+
+### RigidBody2D
+
+```python
+@keel.component
+class RigidBody2D:
+    mass: float = 1.0
+    moment: float = 0.0      # 0 → auto-computed from shape
+    vel_x: float = 0.0
+    vel_y: float = 0.0
+    ang_vel: float = 0.0
+    damping: float = 0.0
+    body_type: int = 0       # use keel.BodyType enum
+```
+
+Set `body_type` with the `keel.BodyType` enum for clarity:
+
+```python
+keel.RigidBody2D(mass=1.0, body_type=keel.BodyType.DYNAMIC)
+keel.RigidBody2D(body_type=keel.BodyType.STATIC)
+keel.RigidBody2D(body_type=keel.BodyType.KINEMATIC)
+```
+
+`moment` defaults to `0`, which tells the bridge to compute an appropriate moment of inertia automatically from the shape. Supply a positive value to override it.
+
+### Collider2D
+
+```python
+@keel.component
+class Collider2D:
+    shape_type: int = 0      # use keel.ShapeType2D enum
+    width: float = 32.0
+    height: float = 32.0
+    radius: float = 16.0
+    friction: float = 0.5
+    elasticity: float = 0.3
+    sensor: bool = False
+    category_bits: int = 1
+    mask_bits: int = 0xFFFF
+```
+
+`shape_type` selects which size fields the bridge reads:
+
+<CardGroup cols={3}>
+  <Card title="CIRCLE" icon="circle">
+    Uses `radius`. Good for balls, projectiles, enemies.
+
+    ```python
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.CIRCLE,
+        radius=20.0,
+    )
+    ```
+  </Card>
+  <Card title="BOX" icon="square">
+    Uses `width` and `height`. Good for platforms, paddles, walls.
+
+    ```python
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.BOX,
+        width=64.0,
+        height=32.0,
+    )
+    ```
+  </Card>
+  <Card title="SEGMENT" icon="minus">
+    A thin capsule along the X axis. `width` sets total length.
+
+    ```python
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.SEGMENT,
+        width=200.0,
+    )
+    ```
+  </Card>
+</CardGroup>
+
+#### Sensors
+
+Setting `sensor=True` makes the shape a trigger volume: dynamic bodies pass through it, but the contact still fires a `CollisionEvent2D` on the frame the overlap begins. Use sensors for pickups, checkpoints, or damage zones where you want detection without physical response.
+
+#### Collision filtering
+
+`category_bits` and `mask_bits` work like pymunk's `ShapeFilter`. A shape collides only with other shapes whose `category_bits` match its own `mask_bits`. The defaults (`category=1`, `mask=0xFFFF`) mean "collide with everything." Divide entities into groups by assigning distinct power-of-two bits:
+
+```python
+CATEGORY_PLAYER  = 0b0001
+CATEGORY_ENEMY   = 0b0010
+CATEGORY_TERRAIN = 0b0100
+
+# Player hits terrain and enemies, but enemies skip each other.
+keel.Collider2D(
+    shape_type=keel.ShapeType2D.CIRCLE,
+    radius=16.0,
+    category_bits=CATEGORY_PLAYER,
+    mask_bits=CATEGORY_ENEMY | CATEGORY_TERRAIN,
+)
+```
+
+## Spawning physics entities
+
+Spawn all three components together. Structural changes are deferred, so call `world.flush()` after spawning if you need the entity to participate in physics before the end of the frame:
+
+```python
+# Static floor.
+floor = app.world.spawn(
+    keel.Transform2D(x=400.0, y=50.0),
+    keel.RigidBody2D(body_type=keel.BodyType.STATIC),
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.BOX,
+        width=600.0,
+        height=20.0,
+        elasticity=0.6,
+    ),
+)
+
+# Dynamic ball.
+ball = app.world.spawn(
+    keel.Transform2D(x=400.0, y=500.0),
+    keel.RigidBody2D(mass=1.0, body_type=keel.BodyType.DYNAMIC),
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.CIRCLE,
+        radius=20.0,
+        elasticity=0.75,
+    ),
+)
+```
+
+## Collision events
+
+`CollisionEvent2D` is emitted by the bridge every frame a contact is active.
+
+```python
+@keel.event
+class CollisionEvent2D:
+    entity_a: int
+    entity_b: int
+    normal_x: float
+    normal_y: float
+    impulse: float
+```
+
+Read events in any system registered at or after `Phase.POST_UPDATE`:
+
+```python
+@app.system(keel.Phase.POST_UPDATE)
+def on_collision(world, dt):
+    for event in world.read_events(keel.CollisionEvent2D):
+        print(
+            f"entity {event.entity_a} hit entity {event.entity_b} "
+            f"with impulse {event.impulse:.1f}"
+        )
+```
+
+<Warning>
+  **`CollisionEvent2D` only fires when at least one body is `DYNAMIC`.** KINEMATIC vs KINEMATIC, KINEMATIC vs STATIC, and STATIC vs STATIC contacts produce no events — this is pymunk's behavior, not a Keel bug. See the [Body Types](/physics/body-types) page for the full matrix and the recommended workarounds.
+</Warning>
+
+For non-sensor contacts the event carries the true pymunk `impulse` (magnitude of the total impulse vector). Sensor contacts set `impulse=0.0`, `normal_x=0.0`, and `normal_y=0.0` because pymunk skips the solver for them.
+
+### Identifying entities in collision handlers
+
+`CollisionEvent2D` carries raw entity IDs. Track them at spawn time so your collision system can dispatch in O(1):
+
+```python
+BULLET_ENTITIES: set[int] = set()
+ENEMY_ENTITIES:  set[int] = set()
+
+bullet = app.world.spawn(...)
+BULLET_ENTITIES.add(bullet)
+
+@app.system(keel.Phase.POST_UPDATE)
+def collision_system(world, dt):
+    for event in world.read_events(keel.CollisionEvent2D):
+        a, b = event.entity_a, event.entity_b
+        if a in BULLET_ENTITIES and b in ENEMY_ENTITIES:
+            handle_hit(a, b)
+        elif b in BULLET_ENTITIES and a in ENEMY_ENTITIES:
+            handle_hit(b, a)
+```
+
+## Physics material presets
+
+`PhysicsMaterial2D` bundles a `friction` and `elasticity` pair into a reusable preset. Apply one to an entity immediately after spawning and flushing — the bridge uses the material's values instead of the `Collider2D` component fields when it builds the pymunk shape:
+
+```python
+from keel.physics import apply_material
+import keel
+
+app.world.flush()
+apply_material(app.world, ball, keel.PhysicsMaterial2D.BOUNCY)
+```
+
+Six built-in presets are available as class attributes:
+
+| Preset | Friction | Elasticity |
+|---|---|---|
+| `PhysicsMaterial2D.DEFAULT` | 0.50 | 0.30 |
+| `PhysicsMaterial2D.BOUNCY`  | 0.30 | 0.90 |
+| `PhysicsMaterial2D.ICE`     | 0.05 | 0.10 |
+| `PhysicsMaterial2D.RUBBER`  | 0.90 | 0.80 |
+| `PhysicsMaterial2D.WOOD`    | 0.60 | 0.20 |
+| `PhysicsMaterial2D.METAL`   | 0.30 | 0.10 |
+
+You can also construct a custom material directly:
+
+```python
+my_material = keel.PhysicsMaterial2D(friction=0.2, elasticity=0.95)
+apply_material(app.world, entity, my_material)
+```
+
+## Direct physics controls
+
+The `Physics2D` bridge object (returned by `setup_physics_2d`) exposes lower-level helpers for gameplay code that needs to drive bodies directly:
+
+```python
+phys = setup_physics_2d(app, gravity_y=-980.0)
+
+# Overwrite a body's velocity (mirrors change into ECS).
+phys.set_velocity(entity_id, vel_x, vel_y)
+
+# Teleport a body (mirrors change into Transform2D).
+phys.set_position(entity_id, x, y)
+
+# Apply a one-shot impulse at the center of mass.
+phys.apply_impulse(entity_id, impulse_x, impulse_y)
+
+# Apply a continuous force (resets every frame — call each tick).
+phys.apply_force(entity_id, force_x, force_y)
+```
+
+<Tip>
+  `set_velocity` and `set_position` mirror their values back into the ECS columns immediately, so the next `sync_to_physics` pass doesn't undo your write. This is especially important for kinematic bodies moved by gameplay code.
+</Tip>
+
+## Raycasting
+
+`Physics2D.raycast_2d` performs a pymunk segment query and returns hits sorted nearest-first by `alpha` (0.0 = start point, 1.0 = end point):
+
+```python
+hits = phys.raycast_2d(
+    start=(player_x, player_y),
+    end=(player_x, player_y - 100.0),
+    radius=0.0,
+)
+
+for hit in hits:
+    print(
+        f"entity {hit['entity_id']} at {hit['point']} "
+        f"(alpha={hit['alpha']:.2f}, normal={hit['normal']})"
+    )
+```
+
+Each entry in the returned list is a `dict` with keys: `entity_id`, `point`, `normal`, and `alpha`.
+
+## ECS tick order
+
+The bridge runs entirely inside the `Phase.POST_UPDATE` system in this fixed order:
+
+<Steps>
+  <Step title="sync_to_physics">
+    Reads `Transform2D`, `RigidBody2D`, and `Collider2D` from every matching archetype and creates or updates the corresponding pymunk bodies and shapes. Entities removed from the ECS have their pymunk objects removed here too.
+  </Step>
+  <Step title="step">
+    Advances the pymunk `Space` by `dt` seconds. The collision handler appends raw tuples to an internal buffer during this step.
+  </Step>
+  <Step title="sync_from_physics">
+    Writes pymunk body state (position, rotation, velocity, angular velocity) back into `Transform2D` and `RigidBody2D` in place. Static bodies are skipped — they never move.
+  </Step>
+  <Step title="_emit_collisions">
+    Drains the collision buffer into `world.emit(CollisionEvent2D(...))`. Systems registered at `Phase.POST_UPDATE` that run after the physics system, or at any later phase, can read the events with `world.read_events(keel.CollisionEvent2D)`.
+  </Step>
+</Steps>
+
+<Note>
+  ECS data is the **source of truth going in**. Physics owns the **result on the way out**. Never read a body's position directly from pymunk — always query `Transform2D` after `Phase.POST_UPDATE`.
+</Note>
+
+## Kinematic body warning
+
+When a second kinematic body joins the simulation alongside any existing kinematic or static body, Keel prints a one-time `UserWarning`:
+
+```
+Physics2D: entity 7 created a KINEMATIC/STATIC or KINEMATIC/KINEMATIC body pair.
+pymunk does NOT emit CollisionEvent2D for these pairs (it's a pymunk limitation,
+not a Keel bug). Fix: change one body to keel.BodyType.DYNAMIC so the collision
+callback fires.
+```
+
+This surfaces the trap before it causes silent failures in gameplay code. See [Body Types](/physics/body-types) for the full collision event matrix.
+
+## Full example: bouncing ball
+
+A complete program — a ball that falls under gravity and bounces on a static floor. Save as `main.py` and run with `python main.py`. Press F3 to toggle the physics debug-draw overlay.
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+from keel.physics import setup_physics_2d
+
+app = keel.App(title="Bouncing Ball", width=800, height=600)
+setup_renderer_2d(app)
+setup_physics_2d(app, gravity_y=-980.0)
+
+tools = keel.dev_tools(app)
+tools.debug_draw.set_visible(True)
+
+# Static floor.
+app.world.spawn(
+    keel.Transform2D(x=400.0, y=50.0),
+    keel.RigidBody2D(body_type=keel.BodyType.STATIC),
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.BOX,
+        width=600.0,
+        height=20.0,
+        elasticity=0.6,
+    ),
+)
+
+# Dynamic ball.
+app.world.spawn(
+    keel.Transform2D(x=400.0, y=500.0),
+    keel.RigidBody2D(mass=1.0, body_type=keel.BodyType.DYNAMIC),
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.CIRCLE,
+        radius=20.0,
+        elasticity=0.75,
+    ),
+)
+
+@app.system(keel.Phase.UPDATE)
+def log_bounces(world, dt):
+    for event in world.read_events(keel.CollisionEvent2D):
+        if event.impulse > 100.0:
+            print(f"bounce: impulse={event.impulse:.0f}")
+
+app.run()
+```
+
+## Troubleshooting
+
+<Accordion title="CollisionEvent2D never fires">
+  The most common cause is body type. `CollisionEvent2D` only fires when **at least one body is DYNAMIC**. Check the [Body Types](/physics/body-types) page for the full matrix. If both bodies are KINEMATIC or STATIC, change at least one to DYNAMIC.
+</Accordion>
+
+<Accordion title="Ball passes through walls at high speed">
+  Tunneling occurs when the ball moves more than its own diameter in a single tick (~1500 px/s at 60 Hz). Workarounds in order of effort: reduce speed, reduce the simulation fixed timestep, or manage ball position manually each frame and push it into pymunk via `phys.set_position` / `phys.set_velocity` (keeping `CollisionEvent2D` for detection only).
+</Accordion>
+
+<Accordion title="RuntimeWarning: entity N has Collider2D without RigidBody2D">
+  Every physics entity needs all three components: `Transform2D`, `RigidBody2D`, **and** `Collider2D`. A `Collider2D` without `RigidBody2D` (or vice versa) is silently skipped, but the bridge emits a one-time `RuntimeWarning` to flag the misconfiguration.
+</Accordion>

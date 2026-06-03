@@ -1,0 +1,291 @@
+---
+title: "Text Rendering with Freetype and Screen-Space Layout"
+sidebarTitle: "Text"
+description: "Keel renders text in screen space using freetype-py. Load fonts with load_font, spawn TextLabel entities, and update content with set_text — y=0 is the top of the screen."
+---
+
+Keel's text system renders glyphs in screen space using freetype-py. Each font is baked into a single R8 texture atlas at load time (using a shelf-packing algorithm), so the per-frame cost is only one draw call per unique `(font, colour)` pair. Text does not move with the 2D or 3D camera — it lives in UI space and is always drawn on top of the game world.
+
+## Prerequisites
+
+Text rendering requires the 2D renderer to be active first, because the text pass draws into the framebuffer that `setup_renderer_2d` clears each frame.
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+from keel.text import setup_text, load_font, set_text, BUILTIN_FONT
+
+app = keel.App(title="Text Demo", width=800, height=600)
+setup_renderer_2d(app)   # must come before setup_text
+text = setup_text(app)
+```
+
+## setup_text
+
+```python
+text_setup = setup_text(app)
+```
+
+Registers a `Phase.POST_RENDER` system and returns a `TextSetup` dataclass:
+
+| Field | Type | Description |
+|---|---|---|
+| `font_registry` | `FontRegistry` | Cache of loaded fonts keyed by `(path, size_px)`. |
+| `text_batch` | `TextBatch` | The screen-space renderer that issues draw calls. |
+
+The call is idempotent — a second call returns the existing setup.
+
+## Loading Fonts
+
+### load_font
+
+```python
+font = load_font(app, path_or_builtin, size_px=24, name=None)
+```
+
+Loads the font file at `path_or_builtin`, sets the pixel size, bakes a glyph atlas, and returns a `Font` object. Subsequent calls with the same `(path, size_px)` pair return the cached `Font` without re-uploading.
+
+| Parameter | Description |
+|---|---|
+| `app` | The `App` instance (used to access the GL context and `FontRegistry`). |
+| `path_or_builtin` | Absolute or relative path to a TTF/OTF file, or `keel.BUILTIN_FONT`. |
+| `size_px` | Pixel height of the rendered glyphs. Larger values use more atlas space. |
+| `name` | Optional string alias for later lookup via `font_registry.get(name)`. |
+
+### The built-in font
+
+`keel.BUILTIN_FONT` is a string path pointing to the bundled **DejaVu Sans Mono** font. It is available immediately after import without any asset files:
+
+```python
+from keel.text import BUILTIN_FONT
+
+font = load_font(app, BUILTIN_FONT, size_px=28)
+```
+
+### Font IDs
+
+`FontRegistry` assigns a stable integer ID to each loaded font in load order. The `TextLabel.font_id` field stores this integer:
+
+```python
+font_a = load_font(app, BUILTIN_FONT, size_px=24)  # font_id = 0
+font_b = load_font(app, "assets/fonts/title.ttf", size_px=48)  # font_id = 1
+```
+
+The `FontRegistry.id_of(font)` method returns the integer for a `Font` object, and `get_by_id(n)` reverses the lookup.
+
+## The TextLabel Component
+
+```python
+@keel.component
+class TextLabel:
+    font_id: int = 0    # which font to use (from load_font)
+    r: float = 1.0      # text colour R
+    g: float = 1.0      # text colour G
+    b: float = 1.0      # text colour B
+    a: float = 1.0      # opacity
+    scale: float = 1.0  # uniform scale applied to each glyph
+    visible: bool = True
+```
+
+`TextLabel` must be spawned with a `Transform2D` that provides the screen-space position. The `Transform2D.x` and `Transform2D.y` values are interpreted as pixel coordinates in UI space — **not** in world space.
+
+```python
+score_label = app.world.spawn(
+    keel.Transform2D(x=10.0, y=35.0),   # screen-space position
+    keel.TextLabel(font_id=0, r=1.0, g=1.0, b=1.0),
+)
+```
+
+## Setting Text Content
+
+Because `TextLabel` is a numpy-backed component, it cannot store a variable-length string directly. Text content lives in a module-level side dict keyed by entity ID. Use the API functions to manage it:
+
+### set_text
+
+```python
+from keel.text import set_text
+
+set_text(score_label, "Score: 0")
+
+# Inside a system, update it whenever the score changes.
+@app.system(keel.Phase.UPDATE)
+def update_score_display(world, dt):
+    gs = world.query_one(GameState)
+    if gs:
+        set_text(score_label, f"Score: {gs['score']}")
+```
+
+### get_text
+
+```python
+from keel.text import get_text
+
+current = get_text(score_label)  # returns "" if unset
+```
+
+### clear_text
+
+```python
+from keel.text import clear_text
+
+clear_text(score_label)  # removes the entry from the side dict
+```
+
+<Note>
+When an entity with a `TextLabel` is despawned, call `clear_text(entity_id)` to remove the corresponding entry from the side dict. If you skip this step, the dict will retain the string indefinitely (a memory leak for long-running sessions).
+</Note>
+
+### set_label_visible
+
+Show or hide a `TextLabel` without despawning the entity:
+
+```python
+from keel.text import set_label_visible
+
+set_label_visible(world, score_label, False)  # hide
+set_label_visible(world, score_label, True)   # show
+```
+
+This is equivalent to `world.set(entity_id, keel.TextLabel, visible=False)`.
+
+## Screen-Space Layout
+
+Text is rendered in UI space with these conventions:
+
+- **`y = 0`** is the **top** of the screen.
+- **Y grows downward** — `y = 100` is 100 pixels from the top.
+- The `Transform2D.y` position is the text **baseline** — the invisible horizontal line that glyphs sit on. Descenders (like the bottom of "g" and "p") hang below it.
+
+<Warning>
+Placing a label at `y = 0` clips the top of the glyphs because the glyph body extends upward from the baseline. As a rule of thumb, set `y` to approximately your font's `size_px` value. For a 28-pixel font, `y=35` keeps the text fully on screen.
+</Warning>
+
+```python
+# Font is 28 px tall. Set y ≥ 28 to keep the first row visible.
+app.world.spawn(
+    keel.Transform2D(x=10.0, y=35.0),
+    keel.TextLabel(font_id=0, r=1.0, g=1.0, b=1.0),
+)
+```
+
+## Newlines and Tabs
+
+The layout engine handles `\n` and `\t` characters:
+
+- `\n` — moves the pen to `origin_x` and advances `y` by one `line_height`.
+- `\t` — advances the pen by `space_advance * 4` (four spaces wide).
+
+```python
+set_text(info_label, "Controls:\n  WASD — move\n  Escape — quit")
+```
+
+## Glyph Atlas Details
+
+Each `Font` bakes a single R8 (single-channel) ModernGL texture using a shelf packer. The default character set covers ASCII printable characters (32–126) plus the full Latin-1 Supplement (160–255). The atlas starts at 512×512 pixels and automatically doubles to 1024×1024 if the character set does not fit. If it still does not fit at 1024×1024, `AtlasTooSmallError` is raised — use a smaller `size_px`.
+
+The atlas stores coverage only; colour is applied per-draw-call via the `u_color` shader uniform. One atlas therefore works for any tint of the same font.
+
+## Full Example
+
+```python
+"""Text rendering demo — score display and multi-line info label."""
+
+import keel
+from keel.renderer import setup_renderer_2d
+from keel.text import setup_text, load_font, set_text, BUILTIN_FONT
+
+# ---------------------------------------------------------------------------
+# Game state
+# ---------------------------------------------------------------------------
+
+@keel.component
+class GameState:
+    score: int = 0
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
+
+app = keel.App(title="Text Demo", width=800, height=600)
+setup_renderer_2d(app)
+setup_text(app)
+
+# Load the built-in font at two sizes.
+font_hud   = load_font(app, BUILTIN_FONT, size_px=28)
+font_small = load_font(app, BUILTIN_FONT, size_px=18)
+
+# ---------------------------------------------------------------------------
+# Entities
+# ---------------------------------------------------------------------------
+
+# A white player square to interact with.
+player = app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.Sprite(texture_id=0, width=32.0, height=32.0, r=1.0, g=1.0, b=1.0),
+)
+
+app.world.spawn(GameState())
+
+# Score label — top-left, y=35 keeps glyphs fully on screen for a 28px font.
+score_label = app.world.spawn(
+    keel.Transform2D(x=10.0, y=35.0),
+    keel.TextLabel(font_id=0, r=1.0, g=1.0, b=0.3),
+)
+set_text(score_label, "Score: 0")
+
+# Multi-line help text — bottom-left.
+help_label = app.world.spawn(
+    keel.Transform2D(x=10.0, y=540.0),
+    keel.TextLabel(font_id=1, r=0.8, g=0.8, b=0.8),
+)
+set_text(help_label, "WASD — move\nEscape — quit")
+
+app.world.flush()
+
+# ---------------------------------------------------------------------------
+# Systems
+# ---------------------------------------------------------------------------
+
+@app.system(keel.Phase.UPDATE)
+def move_player(world, dt):
+    if app.input.is_key_down(keel.KEY_ESCAPE):
+        app.window.close()
+
+    right = 1.0 if app.input.is_key_down(keel.KEY_D) else 0.0
+    left  = 1.0 if app.input.is_key_down(keel.KEY_A) else 0.0
+    up    = 1.0 if app.input.is_key_down(keel.KEY_W) else 0.0
+    down  = 1.0 if app.input.is_key_down(keel.KEY_S) else 0.0
+
+    for transforms, _ in world.query(keel.Transform2D):
+        pass  # move omitted for brevity
+
+@app.system(keel.Phase.UPDATE)
+def tick_score(world, dt):
+    for state, in world.query(GameState):
+        state["score"][0] += 1
+        set_text(score_label, f"Score: {int(state['score'][0])}")
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+app.run()
+```
+
+<Steps>
+  <Step title="Call setup_renderer_2d, then setup_text">
+    Text needs the 2D framebuffer clear that `setup_renderer_2d` provides. Always call `setup_renderer_2d` first.
+  </Step>
+  <Step title="Load a font with load_font">
+    Use `keel.BUILTIN_FONT` to avoid needing any font file on disk. The return value is a `Font` object; its index in the `FontRegistry` is the integer you put in `TextLabel.font_id`.
+  </Step>
+  <Step title="Spawn Transform2D + TextLabel">
+    Place `Transform2D.y` at approximately `font.size_px` pixels from the top edge so glyphs are not clipped.
+  </Step>
+  <Step title="Call set_text to set content">
+    Without a `set_text` call the label renders nothing. Update the string any time — it takes effect on the next frame.
+  </Step>
+  <Step title="Use clear_text on despawn">
+    When an entity with a TextLabel is despawned, call `clear_text(entity_id)` to prevent the side dict from leaking memory.
+  </Step>
+</Steps>

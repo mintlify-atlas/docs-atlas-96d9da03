@@ -1,0 +1,334 @@
+---
+title: "Developer Tools: Inspector, Profiler, and Debug Draw"
+sidebarTitle: "Dev Tools"
+description: "Keel's dev tooling bundle includes an ImGui world inspector (F1), a per-system frame profiler (F2), and 2D physics debug draw (F3). Enable everything with keel.dev_tools(app)."
+---
+
+Keel ships a focused set of in-process developer tools that overlay directly on top of your running game. One call wires them all up: the ImGui world inspector lets you browse every entity and its component values in real time, the frame profiler shows per-system millisecond costs with rolling 60-frame averages, and the physics debug draw outlines every collider so you can see exactly what the physics engine sees. All three are optional and are only activated by calling `keel.dev_tools(app)` — nothing runs unless you ask for it.
+
+## Installation
+
+The dev tools depend on `imgui-bundle`, which is not part of Keel's base install. Add the `tools` extra when you install the package:
+
+```bash
+pip install "keelpy[tools]"
+```
+
+<Note>
+  If `imgui-bundle` is not installed and you call `keel.dev_tools(app)` (or any of the individual setup functions), Keel raises an `ImportError` with the exact `pip install` command you need. No silent failure.
+</Note>
+
+## Enabling the bundle
+
+```python
+import keel
+from keel.physics import setup_physics_2d
+from keel.renderer import setup_renderer_2d
+
+app = keel.App(title="My Game", width=800, height=600)
+setup_renderer_2d(app)
+setup_physics_2d(app, gravity_y=-980.0)
+
+# One call — sets up profiler, debug draw (Physics2D detected), and inspector.
+tools = keel.dev_tools(app)
+
+app.run()
+```
+
+`keel.dev_tools(app)` returns a `DevTools` object and caches it on the app. Calling it a second time returns the same cached instance rather than registering duplicate systems.
+
+### What `dev_tools` sets up
+
+<Steps>
+  <Step title="Profiler">
+    Calls `setup_profiler(app)` — attaches a `FrameProfiler` to the scheduler so every system is timed automatically.
+  </Step>
+  <Step title="Debug Draw (if Physics2D is present)">
+    Calls `setup_debug_draw(app)` only when `Physics2D` is already registered as a world resource. If you have not called `setup_physics_2d` yet, `tools.debug_draw` is `None`.
+  </Step>
+  <Step title="Inspector">
+    Calls `setup_inspector(app)` last — registers the shared ImGui host and both overlay windows (world inspector + profiler overlay). The inspector renders on top of the debug draw lines because it is registered after them.
+  </Step>
+</Steps>
+
+`DevTools` exposes three attributes after setup:
+
+| Attribute | Type | Description |
+|---|---|---|
+| `tools.profiler` | `FrameProfiler` | The profiler attached to the scheduler |
+| `tools.debug_draw` | `DebugDraw2D \| None` | The collision-shape overlay, or `None` if no physics |
+| `tools.inspector` | `WorldInspector` | The ImGui entity browser |
+
+---
+
+## World Inspector (F1)
+
+The world inspector is an ImGui window that lists every archetype registered in the ECS world, including entity IDs and live component field values. It is the fastest way to answer "did my system actually write what I think it wrote?"
+
+### How it works
+
+`setup_inspector(app)` creates a `WorldInspector` and a `ProfilerOverlay`, registers a shared `_ImGuiHost` against the app's ModernGL context, and wires two systems:
+
+- A **`PRE_UPDATE`** system that checks F1 (inspector) and F2 (profiler overlay) toggle keys.
+- A **`POST_RENDER`** system that brackets the ImGui frame, draws both windows, and submits the draw data to GL.
+
+### Reading the inspector window
+
+<CardGroup cols={2}>
+  <Card title="Entity count" icon="list">
+    The header shows the total entity count and the number of non-empty archetypes versus all registered archetypes.
+  </Card>
+  <Card title="Filter box" icon="magnifying-glass">
+    Type a component name (e.g. `Sprite`) to narrow the list to archetypes that contain that component. The match is case-insensitive substring search.
+  </Card>
+  <Card title="Tree rows" icon="sitemap">
+    Each row shows `#<entity_id>: ComponentA, ComponentB, ...`. Click the row to expand it and see every field value sourced live from the structured arrays.
+  </Card>
+  <Card title="Field values" icon="table">
+    Fields print as `ComponentName.field = value`. Non-numpy components fall back to `<opaque>`. Values are read fresh each rendered frame.
+  </Card>
+</CardGroup>
+
+### Programmatic control
+
+```python
+inspector = tools.inspector
+
+# Flip visibility.
+inspector.toggle()
+
+# Set explicitly.
+inspector.set_visible(True)
+inspector.set_visible(False)
+
+# Check visibility.
+if inspector.visible:
+    print("inspector is open")
+```
+
+---
+
+## Frame Profiler (F2)
+
+`FrameProfiler` wraps every system that the scheduler invokes in `time.perf_counter()` markers. The overlay (top-right of the window) lists each system name alongside its rolling 60-frame average in milliseconds and a proportionally scaled bar chart.
+
+### Setup
+
+```python
+from keel.tools.profiler import setup_profiler
+
+profiler = setup_profiler(app)
+```
+
+`setup_profiler` is idempotent — if you call `keel.dev_tools(app)` first, `tools.profiler` is the same instance. The profiler is inserted into the world as a resource (`FrameProfiler`) so other systems can read it via resource injection.
+
+### Reading stats programmatically
+
+```python
+stats = profiler.get_stats()  # dict[str, SystemStats]
+
+for name, s in stats.items():
+    print(f"{name}: avg={s.avg_ms:.2f}ms  min={s.min_ms:.2f}ms  max={s.max_ms:.2f}ms  last={s.last_ms:.2f}ms")
+```
+
+`get_stats()` returns a snapshot of every system that has at least one recorded sample. Each `SystemStats` entry carries:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `str` | System function name |
+| `avg_ms` | `float` | Rolling 60-frame average, in milliseconds |
+| `min_ms` | `float` | Minimum across the rolling window |
+| `max_ms` | `float` | Maximum across the rolling window |
+| `last_ms` | `float` | Most recent sample |
+
+### Attaching and detaching manually
+
+`setup_profiler` calls `Scheduler.attach_profiler(profiler)` internally. You can also call these methods yourself:
+
+```python
+from keel.core.scheduler import Scheduler
+
+scheduler: Scheduler = app.scheduler
+
+# Attach (done automatically by setup_profiler).
+scheduler.attach_profiler(profiler)
+
+# Detach to stop recording without removing systems.
+scheduler.detach_profiler()
+
+# Wipe all recorded samples.
+profiler.reset()
+```
+
+### Overlay controls
+
+The profiler overlay shares the ImGui host with the world inspector. Toggle it with **F2** while the game is running, or control it programmatically through the `ProfilerOverlay` attached to the inspector setup:
+
+```python
+# The overlay is part of the inspector setup bundle.
+overlay = app._keel_inspector_setup["overlay"]
+overlay.toggle()
+overlay.set_visible(False)
+```
+
+---
+
+## Debug Draw 2D (F3)
+
+`DebugDraw2D` renders a collider-outline overlay using GL line segments drawn at `Phase.POST_RENDER`. It walks every entity that has `Transform2D + Collider2D + RigidBody2D` and tessellates each shape into line segments, grouped by body type so the whole overlay issues one draw call per color.
+
+### Color coding
+
+| Color | Meaning |
+|---|---|
+| Green `(0.20, 0.85, 0.30)` | Dynamic body |
+| Gray `(0.55, 0.55, 0.55)` | Static body |
+| Blue `(0.30, 0.55, 1.00)` | Kinematic body |
+| Yellow `(1.00, 0.95, 0.20)` | Sensor collider (any body type) |
+
+### Shape tessellation
+
+| Shape type | Lines drawn |
+|---|---|
+| `ShapeType2D.CIRCLE` | 32-segment circle outline |
+| `ShapeType2D.BOX` | 4-segment rectangle, rotated by `Transform2D.rotation` |
+| `ShapeType2D.SEGMENT` | Single line segment |
+
+### Setup
+
+```python
+from keel.tools.debug_draw import setup_debug_draw
+
+debug = setup_debug_draw(app)
+
+# Start with the overlay visible (it defaults to hidden).
+debug.set_visible(True)
+```
+
+<Warning>
+  `setup_debug_draw` must be called **after** `setup_physics_2d`. The render system queries `Transform2D + Collider2D + RigidBody2D` — entities without all three are silently skipped.
+</Warning>
+
+`keel.dev_tools(app)` handles the ordering automatically: it only calls `setup_debug_draw` when `Physics2D` is already registered, and registers the debug draw system before the inspector so the GL lines appear beneath the ImGui windows.
+
+### Programmatic control
+
+```python
+debug = tools.debug_draw  # None if no Physics2D at dev_tools call time
+
+if debug is not None:
+    debug.toggle()              # flip visibility
+    debug.set_visible(True)     # show
+    debug.set_visible(False)    # hide
+    print(debug.visible)        # bool
+    print(debug.last_line_count)  # segments drawn last frame
+```
+
+---
+
+## Keyboard shortcuts
+
+All three tools use edge-detected polling via `app.input.is_key_down`, checked once per simulation tick. This means each key press toggles exactly once, even if the game runs at a high frame rate with multiple visual frames per sim tick. `KeyEvent`s are not used here because input events can be dropped on visual frames where no sim tick fires.
+
+<CardGroup cols={3}>
+  <Card title="F1" icon="eye">
+    Toggle the World Inspector ImGui window.
+  </Card>
+  <Card title="F2" icon="chart-bar">
+    Toggle the Profiler overlay (top-right HUD).
+  </Card>
+  <Card title="F3" icon="vector-square">
+    Toggle the 2D physics Debug Draw overlay.
+  </Card>
+</CardGroup>
+
+---
+
+## Full example
+
+The following example is drawn from `examples/devtools_overlay.py` in the Keel repository. It spawns 50 dynamic balls inside a static-walled box with zero gravity and enables every overlay with one `keel.dev_tools(app)` call.
+
+```python
+import random
+import keel
+from keel.physics import setup_physics_2d
+from keel.renderer import setup_renderer_2d
+
+WIDTH, HEIGHT = 800, 600
+BALL_COUNT = 50
+BALL_RADIUS = 12.0
+
+app = keel.App(title="DevTools Overlay", width=WIDTH, height=HEIGHT)
+setup_renderer_2d(app)
+
+# Zero gravity + perfect elasticity = perpetual motion — great for tooling demos.
+setup_physics_2d(app, gravity_y=0.0)
+
+# Enables profiler (F2), debug draw (F3), and inspector (F1).
+tools = keel.dev_tools(app)
+
+
+def spawn_wall(x, y, w, h):
+    return app.world.spawn(
+        keel.Transform2D(x=x, y=y),
+        keel.RigidBody2D(body_type=keel.BodyType.STATIC),
+        keel.Collider2D(
+            shape_type=keel.ShapeType2D.BOX,
+            width=w, height=h,
+            friction=0.0, elasticity=1.0,
+        ),
+    )
+
+
+def spawn_ball():
+    return app.world.spawn(
+        keel.Transform2D(
+            x=random.uniform(40.0, WIDTH - 40.0),
+            y=random.uniform(40.0, HEIGHT - 40.0),
+        ),
+        keel.RigidBody2D(
+            mass=1.0,
+            body_type=keel.BodyType.DYNAMIC,
+            vel_x=random.uniform(-300.0, 300.0),
+            vel_y=random.uniform(-300.0, 300.0),
+        ),
+        keel.Collider2D(
+            shape_type=keel.ShapeType2D.CIRCLE,
+            radius=BALL_RADIUS,
+            friction=0.0, elasticity=1.0,
+        ),
+        keel.Sprite(
+            texture_id=0,
+            width=BALL_RADIUS * 2.0, height=BALL_RADIUS * 2.0,
+            r=random.uniform(0.4, 1.0),
+            g=random.uniform(0.4, 1.0),
+            b=random.uniform(0.4, 1.0),
+        ),
+    )
+
+
+# Four static walls around the visible area.
+half = 5.0
+spawn_wall(WIDTH / 2, half,          WIDTH, 10.0)   # floor
+spawn_wall(WIDTH / 2, HEIGHT - half, WIDTH, 10.0)   # ceiling
+spawn_wall(half,          HEIGHT / 2, 10.0, HEIGHT) # left
+spawn_wall(WIDTH - half,  HEIGHT / 2, 10.0, HEIGHT) # right
+
+for _ in range(BALL_COUNT):
+    spawn_ball()
+
+app.world.flush()
+
+
+@app.system(keel.Phase.UPDATE)
+def quit_on_escape(world, dt):
+    if app.input.is_key_down(keel.KEY_ESCAPE):
+        app.window.close()
+
+
+app.run()
+```
+
+<Tip>
+  Open the profiler overlay (F2) and watch the physics system's average millisecond cost climb as you increase `BALL_COUNT`. That is the fastest way to find your game's bottleneck before optimizing.
+</Tip>

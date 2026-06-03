@@ -1,0 +1,223 @@
+---
+title: "App and the Fixed-Step Game Loop"
+sidebarTitle: "App & Loop"
+description: "The Keel App owns the ECS World, Scheduler, Window, and InputState. The fixed-timestep loop runs simulation at 60 Hz and renders once per visual frame."
+---
+
+`keel.App` is the single entry point for every Keel game. It wires together the ECS `World`, the `Scheduler`, the GLFW `Window`, the ModernGL rendering context, and the `InputState` into one object you configure at startup. After setup, a single call to `app.run()` blocks until the window closes, driving the fixed-timestep loop for you.
+
+---
+
+## Creating an App
+
+```python
+import keel
+
+app = keel.App(
+    title="My Game",
+    width=800,
+    height=600,
+    vsync=True,   # default — True enables buffer swap sync
+)
+```
+
+`App.__init__` performs four things in order:
+
+<Steps>
+  <Step title="Creates the ECS World">
+    `app.world` is a fresh `World` instance containing the archetype registry, the command buffer, the event bus, and the scheduler.
+  </Step>
+  <Step title="Opens the GLFW Window">
+    `app.window` is a `Window` object that creates the GLFW window and a ModernGL context. The context is available immediately as `app.ctx`.
+  </Step>
+  <Step title="Wires input callbacks">
+    `app.input` is an `InputState` registered as a world resource so systems can receive it via type injection. GLFW keyboard, mouse, and window-resize callbacks are connected and emit events into the world's event bus.
+  </Step>
+  <Step title="Shares the Scheduler">
+    `app.scheduler` is the same `Scheduler` instance stored inside `app.world`. Decorating with `@app.system(phase)` or `@world.system(phase)` both register into the same runner.
+  </Step>
+</Steps>
+
+---
+
+## App Properties
+
+| Property | Type | Description |
+|---|---|---|
+| `app.world` | `World` | The ECS world — spawn entities, run queries, emit events. |
+| `app.input` | `InputState` | Keyboard, mouse, and window state with held and edge-detected helpers. |
+| `app.ctx` | `moderngl.Context` | The ModernGL GL context — pass to renderer and shader setup functions. |
+| `app.scheduler` | `Scheduler` | The phase-ordered system scheduler. |
+
+---
+
+## Registering Systems
+
+Use `@app.system(phase)` to register a plain function as a system. The `phase` argument controls when the system runs relative to physics, rendering, and other systems within the same frame.
+
+```python
+@app.system(keel.Phase.UPDATE)
+def move_player(world, dt):
+    for transform, in world.query(keel.Transform2D):
+        if app.input.is_key_down(keel.KEY_D):
+            transform['x'] += 200.0 * dt
+        if app.input.is_key_down(keel.KEY_A):
+            transform['x'] -= 200.0 * dt
+```
+
+For ordering within a phase, use the `after` parameter:
+
+```python
+@app.system(keel.Phase.UPDATE)
+def read_input(world, dt):
+    ...
+
+@app.system(keel.Phase.UPDATE, after=read_input)
+def apply_input(world, dt):
+    # Guaranteed to run after read_input within Phase.UPDATE.
+    ...
+```
+
+---
+
+## Resources
+
+Resources are singleton objects stored in the world and injected into systems by type annotation. `app.insert_resource` is a convenience forward to `world.insert_resource`:
+
+```python
+class Config:
+    gravity: float = 980.0
+    max_speed: float = 400.0
+
+app.insert_resource(Config())
+
+@app.system(keel.Phase.UPDATE)
+def apply_gravity(world, dt, cfg: Config):
+    # cfg is injected automatically because Config was registered as a resource.
+    for vel, in world.query(Velocity):
+        vel['y'] -= cfg.gravity * dt
+```
+
+---
+
+## Asset Hot Reload
+
+`app.setup_assets(watch_dirs)` creates the `AssetRegistry`, registers default loaders for JSON and images, and starts the watchdog file watcher so textures and data files reload automatically when changed on disk.
+
+```python
+assets = app.setup_assets(watch_dirs=["assets"])
+```
+
+Pass `watch_dirs=None` (or omit the argument) to skip the file watcher. The registry is also returned for direct use.
+
+---
+
+## Shutdown Hooks
+
+Register cleanup callbacks with `app.add_shutdown_hook`. Hooks run after the loop exits and before GLFW is torn down, in registration order. Exceptions inside individual hooks are swallowed so all hooks always run.
+
+```python
+audio = keel.setup_audio(app)
+
+app.add_shutdown_hook(audio.stop_all)
+app.add_shutdown_hook(lambda: print("Goodbye!"))
+```
+
+---
+
+## Running the Loop
+
+```python
+app.run()
+```
+
+`app.run()` blocks until the window is closed. On exit it calls every registered shutdown hook, destroys the window, and shuts down GLFW.
+
+<Warning>
+`App.run()` is **single-shot**. Calling it a second time on the same `App` instance raises `RuntimeError` because the window and GLFW context are torn down on the first exit. Create a new `App` instance to open a new window.
+</Warning>
+
+---
+
+## The Fixed-Timestep Loop
+
+The loop inside `run_loop` separates simulation from rendering.
+
+```
+┌─ visual frame (variable rate) ─────────────────────────────────┐
+│  1. Clear events from last frame                               │
+│  2. Snapshot input edge state                                  │
+│  3. Poll GLFW (keyboard / mouse / resize callbacks fire here)  │
+│  4. Measure elapsed wall time since last frame                 │
+│                                                                │
+│  ┌─ fixed-step accumulator ──────────────────────────────────┐ │
+│  │  while accumulator >= FIXED_DT (1/60 s):                  │ │
+│  │    scheduler.tick_simulation(world, FIXED_DT)             │ │
+│  │      → PRE_UPDATE → UPDATE → POST_UPDATE systems          │ │
+│  │    world.flush()   ← structural changes applied here      │ │
+│  │    accumulator -= FIXED_DT                                │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                │
+│  5. scheduler.tick_render(world, elapsed)                      │
+│       → PRE_RENDER → RENDER → POST_RENDER systems             │
+└────────────────────────────────────────────────────────────────┘
+```
+
+`FIXED_DT` is `1.0 / 60.0` seconds — the constant timestep passed to every simulation system. Render systems receive the real elapsed wall time for the visual frame.
+
+The accumulator is capped at `10 × FIXED_DT` to prevent the "spiral of death" if the host machine stalls. Any excess elapsed time beyond that cap is discarded rather than scheduling an unbounded burst of catch-up ticks.
+
+<Note>
+Event queues are cleared **once per visual frame**, not once per simulation tick. This means a `KeyEvent` emitted during GLFW polling is visible to all simulation ticks within that frame, and to the render phase.
+</Note>
+
+---
+
+## Exported Loop Constants and Types
+
+These are re-exported from `keel` for convenience:
+
+| Name | Value / Type | Description |
+|---|---|---|
+| `keel.FIXED_DT` | `1/60` s | Fixed simulation timestep. |
+| `keel.PRESS` | GLFW constant | Action value in `KeyEvent` when a key is pressed. |
+| `keel.RELEASE` | GLFW constant | Action value when a key is released. |
+| `keel.REPEAT` | GLFW constant | Action value for a held-key repeat event. |
+| `keel.FixedStepDriver` | class | The accumulator logic; useful for writing headless test drivers. |
+| `keel.RenderState` | class | Per-frame resource holding `alpha` (interpolation progress) and `frame_dt`. |
+
+---
+
+## Minimal Full Example
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+
+app = keel.App(title="Hello Keel", width=800, height=600)
+setup_renderer_2d(app)
+
+@keel.component
+class Player:
+    speed: float = 200.0
+
+app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.Sprite(texture_id=0, width=32.0, height=32.0),
+    Player(),
+)
+
+@app.system(keel.Phase.UPDATE)
+def move(world, dt):
+    for transform, player in world.query(keel.Transform2D, Player):
+        if app.input.is_key_down(keel.KEY_D):
+            transform['x'] += player['speed'] * dt
+        if app.input.is_key_down(keel.KEY_A):
+            transform['x'] -= player['speed'] * dt
+        if app.input.is_key_down(keel.KEY_W):
+            transform['y'] += player['speed'] * dt
+        if app.input.is_key_down(keel.KEY_S):
+            transform['y'] -= player['speed'] * dt
+
+app.run()
+```

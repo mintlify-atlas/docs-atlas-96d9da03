@@ -1,0 +1,472 @@
+---
+title: "World — ECS Entity and Component Management"
+sidebarTitle: "World"
+description: "World is Keel's ECS core. It manages entities, archetypes, commands, events, and resources. All structural changes are deferred through CommandBuffer and applied at flush()."
+---
+
+`World` is the central hub of Keel's Entity-Component-System architecture. It stores every live entity, organises components into cache-friendly archetype tables, routes events through a per-frame bus, holds singleton resources, and drives the `Scheduler`. You never construct a `World` directly in normal usage — `App` creates one and exposes it as `app.world`.
+
+```python
+import keel
+
+app = keel.App()
+world = app.world  # World instance
+
+# Spawn an entity with two components
+player = world.spawn(Position(x=0, y=0), Velocity(vx=0, vy=0))
+
+# Flush immediately so the entity is visible this frame
+world.flush()
+
+print(world.is_alive(player))  # True
+```
+
+<Note>
+  `NULL_ENTITY = 0` is the sentinel value for "no entity". A `World` always starts entity IDs at 1, so any ID equal to `0` is guaranteed to be absent from all queries and inspection calls.
+</Note>
+
+---
+
+## Entity Lifecycle (deferred)
+
+Structural changes — spawning, despawning, and adding or removing components — are buffered in a `CommandBuffer` and only become visible to queries after the next `flush()`. The main loop calls `flush()` automatically at the end of every simulation tick.
+
+<Warning>
+  If you spawn an entity and need to query it in the same system, call `world.flush()` yourself immediately after spawning.
+</Warning>
+
+### `world.spawn(*components) -> int`
+
+Allocate a fresh entity ID and queue a deferred spawn with the given components. Each component type may appear at most once; passing duplicates raises `ValueError`.
+
+<ParamField path="*components" type="Any" required>
+  One or more `@keel.component`-decorated instances. All become columns in the entity's archetype.
+</ParamField>
+
+<ResponseField name="returns" type="int">
+  The new entity ID (always ≥ 1). The entity is not yet visible to queries until `flush()`.
+</ResponseField>
+
+```python
+@keel.component
+class Health:
+    hp: float = 100.0
+
+@keel.component
+class Tag:
+    name: str = ""
+
+enemy = world.spawn(Health(hp=50.0), Tag(name="goblin"))
+world.flush()
+
+print(world.is_alive(enemy))  # True
+```
+
+---
+
+### `world.despawn(entity: int)`
+
+Queue a deferred despawn. The entity is removed from its archetype, its row is swap-removed, and its ID is returned to the free list for recycling — all after the next `flush()`.
+
+<ParamField path="entity" type="int" required>
+  Entity ID to despawn. Despawning an already-dead entity is silently ignored after flush.
+</ParamField>
+
+```python
+world.despawn(enemy)
+world.flush()
+print(world.is_alive(enemy))  # False
+```
+
+---
+
+### `world.add_component(entity: int, component: Any)`
+
+Queue a deferred component addition. If the entity already owns a component of this type, the existing value is overwritten in place (no archetype migration). Otherwise, the entity migrates to a new archetype that includes the new type.
+
+<ParamField path="entity" type="int" required>
+  Target entity ID.
+</ParamField>
+
+<ParamField path="component" type="Any" required>
+  A `@keel.component` instance to attach.
+</ParamField>
+
+```python
+world.add_component(enemy, Stunned(duration=2.0))
+world.flush()
+print(world.has_component(enemy, Stunned))  # True
+```
+
+---
+
+### `world.remove_component(entity: int, component_type: type)`
+
+Queue a deferred component removal. The entity migrates to a new archetype that excludes the given type after `flush()`. Removing a component the entity does not own is silently ignored.
+
+<ParamField path="entity" type="int" required>
+  Target entity ID.
+</ParamField>
+
+<ParamField path="component_type" type="type" required>
+  The `@keel.component` class to remove.
+</ParamField>
+
+```python
+world.remove_component(enemy, Stunned)
+world.flush()
+print(world.has_component(enemy, Stunned))  # False
+```
+
+---
+
+### `world.flush()`
+
+Apply every queued `CommandBuffer` command in the order it was buffered. Commands processed:
+
+- `spawn` — places entity into the correct archetype table
+- `despawn` — swap-removes entity row, recycles ID
+- `add_component` — migrates entity to a superset archetype or overwrites in place
+- `remove_component` — migrates entity to a subset archetype
+
+The main loop calls `flush()` automatically at the end of each simulation tick. Call it manually when you need an entity to be immediately queryable within the same system.
+
+---
+
+## Entity Inspection (synchronous)
+
+These methods read the archetype tables directly and return results immediately — no buffering.
+
+### `world.is_alive(entity: int) -> bool`
+
+Return `True` if `entity` has been flushed and currently resides in an archetype.
+
+```python
+if world.is_alive(player):
+    world.set(player, Health, hp=100.0)
+```
+
+---
+
+### `world.has_component(entity: int, component_type: type) -> bool`
+
+Return `True` if `entity` is alive and its archetype includes `component_type`.
+
+```python
+if world.has_component(entity, Stunned):
+    # skip movement for this entity
+    return
+```
+
+---
+
+### `world.get(entity: int, component_type: type) -> dict | None`
+
+Return the entity's component fields as a plain Python dict of scalar values, or `None` if the entity is absent or does not own the component. Numpy scalars are converted via `.item()` so you get `int` / `float` / `bool` — not `numpy.int64`.
+
+<Warning>
+  The returned dict is a **snapshot copy** — mutating it does not write back to the ECS. Use `world.set()` to write fields.
+</Warning>
+
+<ParamField path="entity" type="int" required>
+  Entity ID to inspect.
+</ParamField>
+
+<ParamField path="component_type" type="type" required>
+  The component class whose fields to read.
+</ParamField>
+
+<ResponseField name="returns" type="dict[str, Any] | None">
+  Field name → Python scalar mapping, or `None` if the entity or component is absent.
+</ResponseField>
+
+```python
+hp_data = world.get(player, Health)
+if hp_data is not None:
+    print(hp_data["hp"])  # plain float
+```
+
+---
+
+### `world.set(entity: int, component_type: type, **fields) -> bool`
+
+Write one or more component fields in place. For numpy-backed components the underlying structured array is updated directly (no allocation). Returns `False` if the entity or component is absent, `True` on success. Raises `ValueError` if any keyword names a field that does not exist on the component.
+
+<ParamField path="entity" type="int" required>
+  Entity ID to modify.
+</ParamField>
+
+<ParamField path="component_type" type="type" required>
+  The component class whose fields to write.
+</ParamField>
+
+<ParamField path="**fields" type="Any" required>
+  Keyword arguments mapping field names to new values.
+</ParamField>
+
+<ResponseField name="returns" type="bool">
+  `True` on success, `False` if the entity or component is not present.
+</ResponseField>
+
+```python
+world.set(player, Health, hp=50.0)
+world.set(player, Position, x=100.0, y=200.0)
+```
+
+---
+
+### `world.get_component(entity: int, component_type: type) -> Any`
+
+Reconstruct and return a full component **instance** (not a dict). Useful when you need the original dataclass object rather than a field dict. Returns `None` if absent.
+
+<ParamField path="entity" type="int" required>
+  Entity ID to inspect.
+</ParamField>
+
+<ParamField path="component_type" type="type" required>
+  The component class to reconstruct.
+</ParamField>
+
+<ResponseField name="returns" type="Any | None">
+  A fresh instance of `component_type` populated with the entity's current field values, or `None`.
+</ResponseField>
+
+```python
+pos = world.get_component(player, Position)
+if pos is not None:
+    print(pos.x, pos.y)
+```
+
+---
+
+### `world.location_of(entity: int) -> tuple[Archetype, int] | None`
+
+Return the low-level `(archetype, row_index)` location of an entity, or `None` if not alive. This is an advanced escape hatch for tools and custom serialisers that need direct column access.
+
+<ResponseField name="returns" type="tuple[Archetype, int] | None">
+  The archetype table and integer row index, or `None`.
+</ResponseField>
+
+---
+
+## Queries
+
+Keel queries scan archetype tables — not entity lists — so they are efficient even with thousands of entities.
+
+### `world.query(*args) -> QueryResult`
+
+Build a query over one or more component types, `Without[C]` exclusion markers, and `Optional[D]` optional-column markers. Returns a `QueryResult` that yields one tuple of column views per matching archetype (not per entity).
+
+<ParamField path="*args" type="type | Without | Optional" required>
+  One or more `@keel.component` classes, `keel.Without[C]` markers, or `keel.Optional[D]` markers. At least one required component type must be present.
+</ParamField>
+
+<ResponseField name="returns" type="QueryResult">
+  Iterable that yields `tuple[column, ...]` per matching archetype. Required columns are always numpy arrays or Python lists; optional columns are `None` when the archetype lacks the type.
+</ResponseField>
+
+```python
+# Required columns — iterate entities that have both Transform2D and Velocity
+for (pos, vel) in world.query(Transform2D, Velocity):
+    # pos and vel are column views (numpy structured arrays or lists)
+    # The slice covers all entities in this archetype
+    pos["x"] += vel["vx"] * dt
+
+# Without marker — exclude entities that also have Frozen
+for (pos, vel) in world.query(Transform2D, Velocity, keel.Without[Frozen]):
+    pos["x"] += vel["vx"] * dt
+
+# Optional column — may be None if archetype lacks the component
+for (pos, health) in world.query(Transform2D, keel.Optional[Health]):
+    if health is not None:
+        print(health["hp"])
+```
+
+`QueryResult` also exposes helper methods:
+
+- `.entities()` — iterator over every matched entity ID
+- `.count()` — total number of matched entities
+- `.archetypes()` — list of matched `Archetype` objects
+
+---
+
+### `world.query_one(component_type: type) -> dict | None`
+
+Return the **first** entity's component fields as plain Python scalars. Intended for singleton components that should appear on exactly one entity (e.g. `GameState`, `Camera2D`). Returns `None` if no entity owns the component.
+
+<ParamField path="component_type" type="type" required>
+  The singleton component class to look up.
+</ParamField>
+
+<ResponseField name="returns" type="dict[str, Any] | None">
+  Field name → Python scalar dict from the first matching entity's row, or `None`.
+</ResponseField>
+
+<Warning>
+  The returned dict is **read-only** — mutating it does not write back. Use `world.set()` to update fields.
+</Warning>
+
+```python
+gs = world.query_one(GameState)
+if gs is not None:
+    print(gs["score"])  # plain int, not numpy.int64
+```
+
+---
+
+### Query Markers
+
+<CardGroup cols={2}>
+  <Card title="Without[C]" icon="ban">
+    Excludes archetypes that contain component type `C`. Use `keel.Without[Frozen]` to skip frozen entities in a movement system.
+  </Card>
+  <Card title="Optional[D]" icon="question">
+    Includes the column for `D` if present in the archetype, otherwise yields `None` for that slot. Lets one query handle entities with and without an optional component.
+  </Card>
+</CardGroup>
+
+---
+
+### `NULL_ENTITY`
+
+```python
+keel.NULL_ENTITY  # int = 0
+```
+
+The sentinel entity ID meaning "no entity". Keel allocates IDs starting from 1, so `NULL_ENTITY` is never alive. Use it to initialise entity-reference fields.
+
+```python
+@keel.component
+class Owner:
+    entity: int = keel.NULL_ENTITY
+```
+
+---
+
+## Resources
+
+Resources are singleton objects stored in the `World` and injected into systems by type annotation. Common uses: renderer state, audio engine, physics world, configuration.
+
+### `world.insert_resource(resource, type_=None)`
+
+Register `resource` as a singleton keyed by its type (or by `type_` if provided).
+
+<ParamField path="resource" type="Any" required>
+  The singleton object to register.
+</ParamField>
+
+<ParamField path="type_" type="type | None" default="None">
+  Key override. Useful for registering a subclass instance retrievable by its base class.
+</ParamField>
+
+```python
+world.insert_resource(GameConfig(gravity=9.81))
+```
+
+---
+
+### `world.get_resource(type_) -> Any`
+
+Return the registered resource of the given type, or `None` if not found.
+
+```python
+cfg = world.get_resource(GameConfig)
+```
+
+---
+
+### `world.has_resource(type_) -> bool`
+
+Return `True` if a resource of the given type is currently registered.
+
+```python
+if world.has_resource(Physics2D):
+    phys = world.get_resource(Physics2D)
+```
+
+---
+
+### `world.remove_resource(type_) -> Any`
+
+Remove and return the resource registered under `type_`, or `None` if absent.
+
+```python
+old_cfg = world.remove_resource(GameConfig)
+```
+
+---
+
+## Events
+
+Keel's event bus clears all queues at the start of every visual frame, so events emitted by a system during tick N are readable by later systems in tick N but gone by tick N+1.
+
+### `world.emit(event_instance)`
+
+Queue an event for all systems to read this frame.
+
+<ParamField path="event_instance" type="Any" required>
+  An instance of a class decorated with `@keel.event`.
+</ParamField>
+
+```python
+world.emit(keel.CollisionEvent2D(entity_a=player, entity_b=wall,
+                                  normal_x=0.0, normal_y=1.0, impulse=5.2))
+```
+
+---
+
+### `world.read_events(event_type) -> Iterator`
+
+Iterate over all events of the given type emitted this frame.
+
+<ParamField path="event_type" type="type" required>
+  The `@keel.event`-decorated class to filter on.
+</ParamField>
+
+<ResponseField name="returns" type="Iterator[Any]">
+  Iterator over every queued instance of `event_type` for this frame.
+</ResponseField>
+
+```python
+for evt in world.read_events(keel.KeyEvent):
+    if evt.key == keel.KEY_SPACE and evt.action == keel.PRESS:
+        world.emit(JumpEvent(entity=player))
+```
+
+---
+
+## Systems
+
+### `world.system(phase, after=None)`
+
+Decorator to register a system function in the given phase. Equivalent to `@app.system(phase)` — both target the same shared `Scheduler`.
+
+```python
+@world.system(keel.Phase.UPDATE)
+def update_health(world, dt):
+    for (hp,) in world.query(Health):
+        hp["hp"] -= 1.0 * dt
+```
+
+See [`Scheduler.register`](/api/scheduler#register) for details on `after` ordering and resource injection.
+
+---
+
+### `world.tick(dt: float)`
+
+Run one complete frame manually: clear events, invoke all systems in phase order, then flush commands. Used in tests and headless simulations — `App.run()` calls the loop's `FixedStepDriver` instead.
+
+<ParamField path="dt" type="float" required>
+  The simulated delta time to pass to every system.
+</ParamField>
+
+```python
+# Headless test
+world = keel.World()
+
+@world.system(keel.Phase.UPDATE)
+def step(world, dt):
+    ...
+
+world.tick(keel.FIXED_DT)
+```

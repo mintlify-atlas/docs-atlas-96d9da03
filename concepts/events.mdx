@@ -1,0 +1,269 @@
+---
+title: "Typed Event Bus in Keel"
+sidebarTitle: "Events"
+description: "Keel's typed event bus lets systems emit and read strongly-typed events each frame. All event queues are cleared at the start of every tick."
+---
+
+Keel's event bus gives systems a structured, decoupled way to communicate within a frame. One system emits an event by type; any other system — running later in the same frame — reads events of that type. Because the bus is typed, there is no string-keyed dispatch, no casting, and no shared mutable state between the emitter and the reader.
+
+---
+
+## Defining an Event
+
+Decorate a plain class with `@keel.event` to register it as an event type. The decorator wraps the class as a `dataclass` automatically if it isn't one already:
+
+```python
+import keel
+
+@keel.event
+class ScoredEvent:
+    team: int
+    points: int
+
+@keel.event
+class PlayerDied:
+    entity: int
+    cause: str
+```
+
+Fields can be any Python types — events are not stored in numpy arrays, so strings, tuples, and dicts are all valid.
+
+---
+
+## Emitting Events
+
+Call `world.emit(event_instance)` from any system (or from startup code, callbacks, or anywhere that has access to the world). The event is appended to its type-specific queue and becomes immediately readable by systems running later in the same frame.
+
+```python
+@app.system(keel.Phase.POST_UPDATE)
+def detect_deaths(world, dt):
+    for health, in world.query(Health):
+        for i, eid in enumerate(world.query(Health).entities()):
+            if health['hp'][i] <= 0:
+                world.emit(PlayerDied(entity=eid, cause="damage"))
+```
+
+---
+
+## Reading Events
+
+Call `world.read_events(EventType)` to iterate every event of that type queued in the current frame. The return value is an iterator — use it in a `for` loop:
+
+```python
+@app.system(keel.Phase.POST_UPDATE)
+def on_player_died(world, dt):
+    for event in world.read_events(PlayerDied):
+        print(f"Entity {event.entity} died from: {event.cause}")
+        world.despawn(event.entity)
+```
+
+Reading an event type that has no queued events returns an empty iterator — the loop body simply does not execute.
+
+---
+
+## Event Lifetime
+
+<Note>
+All event queues are cleared **once per visual frame**, at the very start of the outer loop iteration — before GLFW polls for input. Events emitted during frame N are never visible in frame N+1.
+</Note>
+
+Within a single frame there can be multiple simulation ticks (the fixed-step accumulator may fire several `PRE_UPDATE → UPDATE → POST_UPDATE` cycles). Events emitted during tick 1 of a frame are still readable during tick 2 of that same frame. The cleared-once-per-frame rule means the queue only resets between visual frames, not between simulation ticks.
+
+```
+Visual frame N
+  events cleared here ──────────────────────────────────────────┐
+  GLFW polling (KeyEvent, MouseMoveEvent, … queued here)         │
+  Sim tick 1: PRE_UPDATE → UPDATE → POST_UPDATE                  │
+    custom events may be emitted and read within the same tick   │
+  Sim tick 2: PRE_UPDATE → UPDATE → POST_UPDATE                  │
+    events from tick 1 are still visible here                    │
+  Render: PRE_RENDER → RENDER → POST_RENDER                      │
+    events from all sim ticks still visible                      │
+──────────────────────────────────────────────────────────────── ┘
+Visual frame N+1
+  events cleared here (all queues empty again)
+```
+
+---
+
+## Built-in Event Types
+
+Keel emits these event types automatically from input callbacks and physics bridges. Read them in any system.
+
+<CardGroup cols={2}>
+  <Card title="KeyEvent" icon="keyboard">
+    Fired when a key is pressed, repeated, or released.
+    ```python
+    @keel.event
+    class KeyEvent:
+        key: int      # keel.KEY_* constant
+        action: int   # keel.PRESS, RELEASE, REPEAT
+        mods: int     # modifier bitmask
+    ```
+  </Card>
+  <Card title="MouseButtonEvent" icon="computer-mouse">
+    Fired on mouse button press or release.
+    ```python
+    @keel.event
+    class MouseButtonEvent:
+        button: int   # keel.MOUSE_BUTTON_LEFT, …
+        action: int   # keel.PRESS or keel.RELEASE
+        mods: int
+    ```
+  </Card>
+  <Card title="MouseMoveEvent" icon="arrow-pointer">
+    Fired whenever the cursor moves.
+    ```python
+    @keel.event
+    class MouseMoveEvent:
+        x: float
+        y: float
+    ```
+  </Card>
+  <Card title="MouseScrollEvent" icon="scroll">
+    Fired on scroll wheel movement.
+    ```python
+    @keel.event
+    class MouseScrollEvent:
+        x_offset: float
+        y_offset: float
+    ```
+  </Card>
+  <Card title="WindowResizeEvent" icon="window-restore">
+    Fired when the OS resizes the window.
+    ```python
+    @keel.event
+    class WindowResizeEvent:
+        width: int
+        height: int
+    ```
+  </Card>
+  <Card title="GamepadButtonEvent" icon="gamepad">
+    Fired on gamepad button press or release.
+    ```python
+    @keel.event
+    class GamepadButtonEvent:
+        gamepad_id: int
+        button: int   # keel.GAMEPAD_BUTTON_A, …
+        action: int   # keel.PRESS or keel.RELEASE
+    ```
+  </Card>
+  <Card title="GamepadAxisEvent" icon="sliders">
+    Fired when an axis moves past the 0.05 deadzone.
+    ```python
+    @keel.event
+    class GamepadAxisEvent:
+        gamepad_id: int
+        axis: int     # keel.GAMEPAD_AXIS_LEFT_X, …
+        value: float  # −1.0 … 1.0
+    ```
+  </Card>
+  <Card title="CollisionEvent2D" icon="circle-dot">
+    Fired by the pymunk bridge when a dynamic body contacts another body.
+    ```python
+    @keel.event
+    class CollisionEvent2D:
+        entity_a: int
+        entity_b: int
+        impulse: float
+    ```
+  </Card>
+</CardGroup>
+
+`CollisionEvent3D` mirrors `CollisionEvent2D` for the pybullet 3D bridge.
+
+---
+
+## Custom Events: Full Example
+
+The following example defines a custom `ScoredEvent`, emits it from one system, and reads it in another. The emitter and reader are decoupled — neither imports from the other.
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+
+app = keel.App(title="Events Demo", width=800, height=600)
+setup_renderer_2d(app)
+
+# --- Define the event ---
+
+@keel.event
+class ScoredEvent:
+    team: int
+    points: int
+
+# --- Singleton game state ---
+
+@keel.component
+class GameState:
+    score_a: int = 0
+    score_b: int = 0
+
+app.world.spawn(GameState())
+app.world.flush()
+
+# --- Emitter system: runs at UPDATE ---
+
+@app.system(keel.Phase.UPDATE)
+def check_goals(world, dt):
+    for ball_transform, in world.query(keel.Transform2D, BallTag):
+        bx = ball_transform['x'][0]
+        if bx < 0:
+            world.emit(ScoredEvent(team=2, points=1))
+        elif bx > 800:
+            world.emit(ScoredEvent(team=1, points=1))
+
+# --- Reader system: runs at POST_UPDATE, after scoring is computed ---
+
+@app.system(keel.Phase.POST_UPDATE)
+def apply_scores(world, dt):
+    for event in world.read_events(ScoredEvent):
+        gs = world.query_one(GameState)
+        if gs is None:
+            return
+        # Find the entity to write back.
+        for game_state, in world.query(GameState):
+            if event.team == 1:
+                game_state['score_a'] += event.points
+            else:
+                game_state['score_b'] += event.points
+        print(
+            f"Team {event.team} scored! "
+            f"Score: {gs['score_a']} — {gs['score_b']}"
+        )
+
+app.run()
+```
+
+---
+
+## Handling Keyboard Input via Events
+
+For one-shot reactions (opening a pause menu, firing a weapon), `KeyEvent` is cleaner than polling `app.input.is_key_pressed` because it captures every transition even if multiple keys were pressed between frames:
+
+```python
+@app.system(keel.Phase.UPDATE)
+def handle_keys(world, dt):
+    for ev in world.read_events(keel.KeyEvent):
+        if ev.key == keel.KEY_ESCAPE and ev.action == keel.PRESS:
+            # Close the window immediately.
+            app.window.close()
+
+        if ev.key == keel.KEY_F and ev.action == keel.PRESS:
+            world.emit(FireEvent())
+```
+
+<Tip>
+Use `app.input.is_key_down` for movement and held actions where you need smooth per-frame behaviour. Use `world.read_events(keel.KeyEvent)` for one-shot triggers where you need to know the exact moment the key transitioned, or when you care about modifier keys (`ev.mods`).
+</Tip>
+
+---
+
+## Emitting Events Outside Systems
+
+You can emit events from any code that has access to the world — startup, GLFW callbacks, asset loaders. The events land in the current frame's queue and are readable by all systems that run after the emit:
+
+```python
+# During startup — visible to all systems on the first frame.
+app.world.emit(GameStartedEvent(level=1))
+```

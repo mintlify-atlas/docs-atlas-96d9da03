@@ -1,0 +1,346 @@
+---
+title: "Input Handling: Keyboard, Mouse, and Gamepad"
+sidebarTitle: "Input"
+description: "Keel's InputState exposes held-state and edge-detected helpers for keyboard and mouse. Gamepad support covers up to 4 controllers with button and axis events."
+---
+
+Keel provides two complementary input surfaces: a stateful `InputState` poller on `app.input` for frame-by-frame "is this held right now" checks, and a typed event bus for one-shot reactions. Both are updated by GLFW callbacks on every tick. Edge detection—`is_key_pressed` and `is_key_released`—is snapshotted once at the start of each simulation tick via `begin_frame()`, so a key press is `True` for exactly one frame.
+
+---
+
+## Keyboard
+
+`app.input` is an `InputState` instance available immediately after creating your `App`. No additional setup call is needed.
+
+### Held-state polling
+
+Use these methods inside any system when you need continuous input (movement, held fire, held menu navigation):
+
+| Method | Returns | Notes |
+|---|---|---|
+| `app.input.is_key_down(key)` | `bool` | `True` every frame the key is physically held |
+| `app.input.is_key_pressed(key)` | `bool` | `True` only on the **first** frame the key goes down |
+| `app.input.is_key_released(key)` | `bool` | `True` only on the **first** frame the key comes up |
+
+```python
+import keel
+
+@app.system(keel.Phase.UPDATE)
+def move_player(world, dt):
+    for transform, player in world.query(keel.Transform2D, Player):
+        if app.input.is_key_down(keel.KEY_D):
+            transform['x'] += player['speed'] * dt
+        if app.input.is_key_down(keel.KEY_A):
+            transform['x'] -= player['speed'] * dt
+        if app.input.is_key_down(keel.KEY_W):
+            transform['y'] += player['speed'] * dt
+        if app.input.is_key_down(keel.KEY_S):
+            transform['y'] -= player['speed'] * dt
+
+        # Jump: one-shot on the frame the key is first pressed.
+        if app.input.is_key_pressed(keel.KEY_SPACE):
+            trigger_jump(transform)
+```
+
+### Key constants
+
+All GLFW `KEY_*` values are re-exported directly under the `keel` namespace. Common ones:
+
+```python
+keel.KEY_W        # W
+keel.KEY_A        # A
+keel.KEY_S        # S
+keel.KEY_D        # D
+keel.KEY_SPACE    # Space bar
+keel.KEY_ESCAPE   # Escape
+keel.KEY_F5       # F5 (and all other Fx keys)
+keel.KEY_LEFT     # Arrow keys
+keel.KEY_RIGHT
+keel.KEY_UP
+keel.KEY_DOWN
+```
+
+Every `glfw.KEY_*` constant is available — the full list is in the GLFW documentation. Access any of them as `keel.KEY_<SUFFIX>`.
+
+### Action constants
+
+The `action` field on `KeyEvent` (and `GamepadButtonEvent`) uses these constants:
+
+```python
+keel.PRESS    # key transitioned from up to down
+keel.RELEASE  # key transitioned from down to up
+keel.REPEAT   # OS-level key repeat while held
+```
+
+### Event-based reactions
+
+For one-shot reactions that must fire exactly once—quit on Escape, fire a weapon—read `KeyEvent` off the world bus instead of polling:
+
+<Note>
+`KeyEvent` is emitted on `PRESS` and `REPEAT` actions, but **never** on `RELEASE`. To detect a key release via events, use `app.input.is_key_released()` or listen to `MouseButtonEvent` for mouse equivalents. For keyboard release events, the polling API is the canonical path.
+</Note>
+
+```python
+import keel
+
+@app.system(keel.Phase.UPDATE)
+def handle_quit(world, dt):
+    for ev in world.read_events(keel.KeyEvent):
+        if ev.key == keel.KEY_ESCAPE and ev.action == keel.PRESS:
+            app.window.close()
+```
+
+`KeyEvent` fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `key` | `int` | GLFW key code (compare with `keel.KEY_*`) |
+| `scancode` | `int` | Platform-specific scan code |
+| `action` | `int` | `keel.PRESS` or `keel.REPEAT` |
+| `mods` | `int` | Modifier bitmask (Shift, Ctrl, Alt, Super) |
+
+---
+
+## Mouse
+
+Mouse state is exposed through the same `app.input` poller and through three event types on the world bus.
+
+### Polling
+
+```python
+# True only on the first frame the button goes down.
+app.input.is_mouse_button_pressed(keel.MOUSE_BUTTON_LEFT)
+
+# True every frame the button is held.
+app.input.is_mouse_button_down(keel.MOUSE_BUTTON_LEFT)
+
+# True only on the first frame the button comes up.
+app.input.is_mouse_button_released(keel.MOUSE_BUTTON_LEFT)
+
+# Current cursor position in window coordinates.
+x, y = app.input.mouse_position()
+
+# Accumulated scroll delta since last call — resets to (0, 0) after each call.
+dx, dy = app.input.consume_scroll()
+```
+
+### Mouse button constants
+
+```python
+keel.MOUSE_BUTTON_LEFT    # primary button
+keel.MOUSE_BUTTON_RIGHT   # secondary button
+keel.MOUSE_BUTTON_MIDDLE  # middle / scroll-click
+keel.MOUSE_BUTTON_4       # extra buttons 4-8
+keel.MOUSE_BUTTON_5
+keel.MOUSE_BUTTON_6
+keel.MOUSE_BUTTON_7
+keel.MOUSE_BUTTON_8
+```
+
+### Mouse events
+
+Read these from `world.read_events(EventType)` inside any system:
+
+<CardGroup cols={3}>
+  <Card title="MouseButtonEvent" icon="computer-mouse">
+    Emitted on every button press **and** release.
+
+    Fields: `button: int`, `action: int`, `mods: int`
+  </Card>
+  <Card title="MouseMoveEvent" icon="arrow-pointer">
+    Emitted whenever the cursor moves inside the window.
+
+    Fields: `x: float`, `y: float`
+  </Card>
+  <Card title="MouseScrollEvent" icon="arrows-up-down">
+    Emitted on scroll wheel motion.
+
+    Fields: `x_offset: float`, `y_offset: float`
+  </Card>
+</CardGroup>
+
+```python
+import keel
+
+@app.system(keel.Phase.UPDATE)
+def handle_mouse(world, dt):
+    # One-shot click detection via events.
+    for ev in world.read_events(keel.MouseButtonEvent):
+        if ev.button == keel.MOUSE_BUTTON_LEFT and ev.action == keel.PRESS:
+            x, y = app.input.mouse_position()
+            print(f"left click at ({x:.0f}, {y:.0f})")
+
+    # Scroll zoom.
+    for ev in world.read_events(keel.MouseScrollEvent):
+        zoom_camera(ev.y_offset)
+
+    # Continuous cursor tracking — just poll.
+    cursor_x, cursor_y = app.input.mouse_position()
+    update_crosshair(cursor_x, cursor_y)
+```
+
+<Tip>
+Mouse coordinates are in **window space**: `(0, 0)` is the top-left corner and `y` grows downward. This matches the screen-space coordinate system used by `TextLabel`.
+</Tip>
+
+---
+
+## Gamepad
+
+Keel supports up to four gamepads simultaneously (slots 0–3) using GLFW's standard gamepad mapping API. Call `setup_gamepad(app)` once at startup; it registers a `PRE_UPDATE` system that polls GLFW every tick and emits transition events.
+
+### Setup
+
+```python
+import keel
+from keel.gamepad import setup_gamepad
+
+app = keel.App(title="My Game", width=800, height=600)
+gamepad = setup_gamepad(app)  # returns GamepadState; idempotent
+```
+
+`setup_gamepad` inserts the `GamepadState` as a world resource and wires a `PRE_UPDATE` poll system. Calling it a second time returns the same `GamepadState`.
+
+### Polling
+
+```python
+@app.system(keel.Phase.UPDATE)
+def gamepad_move(world, dt):
+    if not gamepad.is_connected(0):
+        return  # slot 0 not connected
+
+    # Analog stick — returns float in [-1.0, 1.0].
+    x = gamepad.get_axis(0, keel.GAMEPAD_AXIS_LEFT_X)
+    y = gamepad.get_axis(0, keel.GAMEPAD_AXIS_LEFT_Y)
+
+    # Digital button — returns bool.
+    if gamepad.is_button_down(0, keel.GAMEPAD_BUTTON_A):
+        trigger_jump()
+
+    # Apply movement.
+    for transform, player in world.query(keel.Transform2D, Player):
+        transform['x'] += x * player['speed'] * dt
+        transform['y'] += y * player['speed'] * dt
+```
+
+### GamepadState methods
+
+| Method | Signature | Description |
+|---|---|---|
+| `is_connected` | `(gamepad_id: int) → bool` | `True` if a mapped gamepad is present in slot 0–3 |
+| `is_button_down` | `(gamepad_id: int, button: int) → bool` | `True` while the button is held |
+| `get_axis` | `(gamepad_id: int, axis: int) → float` | Raw value in `[-1.0, 1.0]`; `0.0` if disconnected or out of range |
+
+<Note>
+`get_axis` returns the **raw** value from GLFW. A separate 0.05 deadzone is applied only to axis **events** (`GamepadAxisEvent`): an event is emitted only when the axis value changes by more than 0.05 since the last emitted value. Polling via `get_axis` always gives the unfiltered reading.
+</Note>
+
+### Button constants
+
+```python
+keel.GAMEPAD_BUTTON_A             # face buttons
+keel.GAMEPAD_BUTTON_B
+keel.GAMEPAD_BUTTON_X
+keel.GAMEPAD_BUTTON_Y
+keel.GAMEPAD_BUTTON_LEFT_BUMPER   # shoulder buttons
+keel.GAMEPAD_BUTTON_RIGHT_BUMPER
+keel.GAMEPAD_BUTTON_LEFT_THUMB    # stick clicks
+keel.GAMEPAD_BUTTON_RIGHT_THUMB
+keel.GAMEPAD_BUTTON_BACK          # menu buttons
+keel.GAMEPAD_BUTTON_START
+keel.GAMEPAD_BUTTON_GUIDE
+keel.GAMEPAD_BUTTON_DPAD_UP       # D-pad
+keel.GAMEPAD_BUTTON_DPAD_DOWN
+keel.GAMEPAD_BUTTON_DPAD_LEFT
+keel.GAMEPAD_BUTTON_DPAD_RIGHT
+```
+
+### Axis constants
+
+```python
+keel.GAMEPAD_AXIS_LEFT_X          # left stick horizontal
+keel.GAMEPAD_AXIS_LEFT_Y          # left stick vertical
+keel.GAMEPAD_AXIS_RIGHT_X         # right stick horizontal
+keel.GAMEPAD_AXIS_RIGHT_Y         # right stick vertical
+keel.GAMEPAD_AXIS_LEFT_TRIGGER    # left trigger  [0.0, 1.0] at rest = -1.0
+keel.GAMEPAD_AXIS_RIGHT_TRIGGER   # right trigger
+```
+
+### Gamepad events
+
+<CardGroup cols={2}>
+  <Card title="GamepadButtonEvent" icon="gamepad">
+    Emitted on every button press and release.
+
+    Fields: `gamepad_id: int`, `button: int`, `action: int` (`keel.PRESS` or `keel.RELEASE`)
+  </Card>
+  <Card title="GamepadAxisEvent" icon="sliders">
+    Emitted when an axis moves more than 0.05 since the last emission.
+
+    Fields: `gamepad_id: int`, `axis: int`, `value: float`
+  </Card>
+</CardGroup>
+
+```python
+@app.system(keel.Phase.UPDATE)
+def on_gamepad_events(world, dt):
+    for ev in world.read_events(keel.GamepadButtonEvent):
+        if ev.gamepad_id == 0 and ev.button == keel.GAMEPAD_BUTTON_START:
+            if ev.action == keel.PRESS:
+                toggle_pause()
+
+    for ev in world.read_events(keel.GamepadAxisEvent):
+        if ev.gamepad_id == 0 and ev.axis == keel.GAMEPAD_AXIS_LEFT_X:
+            print(f"left stick X moved to {ev.value:.2f}")
+```
+
+### Disconnect handling
+
+<Warning>
+When a gamepad disconnects mid-session, Keel synthesizes `RELEASE` events for every button that was held at the moment of disconnect. This prevents "stuck input" bugs where your game logic never sees the button come up. Always check `gamepad.is_connected(slot)` before reading axes — `get_axis` returns `0.0` for disconnected slots, but your game logic may need to react differently (e.g., pause and prompt to reconnect).
+</Warning>
+
+### Complete gamepad example
+
+```python
+import keel
+from keel.gamepad import setup_gamepad
+from keel.renderer import setup_renderer_2d
+
+app = keel.App(title="Gamepad Demo", width=800, height=600)
+setup_renderer_2d(app)
+gamepad = setup_gamepad(app)
+
+SPEED = 250.0
+
+@keel.component
+class Player:
+    speed: float = SPEED
+
+player_entity = app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.Sprite(texture_id=0, width=32.0, height=32.0),
+    Player(),
+)
+app.world.flush()
+
+@app.system(keel.Phase.UPDATE)
+def move(world, dt):
+    if not gamepad.is_connected(0):
+        return
+
+    lx = gamepad.get_axis(0, keel.GAMEPAD_AXIS_LEFT_X)
+    ly = gamepad.get_axis(0, keel.GAMEPAD_AXIS_LEFT_Y)
+
+    for transform, player in world.query(keel.Transform2D, Player):
+        transform['x'] += lx * player['speed'] * dt
+        transform['y'] += ly * player['speed'] * dt
+
+@app.system(keel.Phase.UPDATE)
+def on_buttons(world, dt):
+    for ev in world.read_events(keel.GamepadButtonEvent):
+        if ev.gamepad_id == 0 and ev.button == keel.GAMEPAD_BUTTON_A and ev.action == keel.PRESS:
+            print("A pressed — jump!")
+
+app.run()
+```

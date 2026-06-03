@@ -1,0 +1,283 @@
+---
+title: "Audio: Sound Effects, Music, and Volume Control"
+sidebarTitle: "Audio"
+description: "Keel's audio engine (miniaudio) plays one-shot sound effects and streaming music tracks. Control per-channel volume, fade music in and out, and bind sounds to entities."
+---
+
+Keel's audio system is built on [miniaudio](https://miniaud.io/) and exposed through a small set of module-level helpers. One-shot sound effects are decoded into memory on first play and mixed in a stereo int16 buffer on a background thread. Music tracks are streamed from disk frame by frame. All three volume channels—master, SFX, and music—are independently adjustable at runtime, and music transitions support linear fade-in and fade-out ramps.
+
+---
+
+## Setup
+
+Call `setup_audio(app)` once, before any play calls. It creates the `AudioEngine`, registers a `PRE_UPDATE` system that drains finished handles and advances music fades, and wires a shutdown hook so the device closes cleanly when the app exits.
+
+```python
+import keel
+from keel.audio import setup_audio, play_sound, play_music, stop_music, set_volume
+
+app = keel.App(title="My Game", width=800, height=600)
+audio = setup_audio(app)  # returns AudioSetup; idempotent
+```
+
+`setup_audio` returns an `AudioSetup` dataclass with a single field, `engine`, that holds the underlying `AudioEngine`. Most code uses the module-level helpers instead of touching the engine directly.
+
+<Note>
+`setup_audio` is idempotent — calling it more than once on the same `app` returns the same `AudioSetup` without creating a second device or registering duplicate systems.
+</Note>
+
+---
+
+## Sound Effects
+
+`play_sound` decodes the file on the first call and caches it; subsequent plays reuse the cached PCM data with no disk I/O.
+
+```python
+handle = play_sound(app, "assets/sounds/jump.wav")
+handle = play_sound(app, "assets/sounds/coin.ogg", volume=0.6)
+handle = play_sound(app, "assets/sounds/alarm.wav", volume=1.0, loop=True)
+```
+
+### `play_sound` signature
+
+```python
+def play_sound(
+    app,
+    path: str,
+    volume: float = 1.0,
+    loop: bool = False,
+) -> SoundHandle: ...
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str` | — | Path to the audio file (`.wav`, `.ogg`, `.mp3`, `.flac`) |
+| `volume` | `float` | `1.0` | Gain for this specific instance, clamped to `[0.0, 1.0]` |
+| `loop` | `bool` | `False` | Loop the sound indefinitely until stopped |
+
+Returns a `SoundHandle` — an immutable, hashable token you can use to stop the sound early.
+
+### Stopping a sound
+
+```python
+handle = play_sound(app, "assets/sounds/engine.wav", loop=True)
+
+# Later, when the engine should stop:
+stop_sound(app, handle)
+```
+
+`stop_sound` is a no-op if the handle is unknown or the sound has already finished.
+
+### Checking playback state
+
+Call `is_playing` directly on the engine if you need to poll whether a one-shot has finished:
+
+```python
+from keel.audio import setup_audio
+
+audio = setup_audio(app)
+handle = play_sound(app, "assets/sounds/explosion.wav")
+
+@app.system(keel.Phase.UPDATE)
+def check_done(world, dt):
+    if not audio.engine.is_playing(handle):
+        print("explosion finished")
+```
+
+---
+
+## Music
+
+`play_music` opens the file as a streaming source, replacing any track that is currently playing. The transition can be instant or ramped with `fade_in`.
+
+```python
+play_music(app, "assets/music/theme.ogg")
+play_music(app, "assets/music/theme.ogg", loop=True, fade_in=2.0)
+play_music(app, "assets/music/battle.ogg", loop=True, fade_in=0.5)
+```
+
+### `play_music` signature
+
+```python
+def play_music(
+    app,
+    path: str,
+    loop: bool = True,
+    fade_in: float = 0.0,
+) -> None: ...
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str` | — | Path to the audio file |
+| `loop` | `bool` | `True` | Loop the track when it reaches the end |
+| `fade_in` | `float` | `0.0` | Seconds to linearly ramp gain from `0.0` to the current music volume |
+
+### Stopping music
+
+```python
+# Instant stop.
+stop_music(app)
+
+# Fade out over 1.5 seconds, then stop.
+stop_music(app, fade_out=1.5)
+```
+
+### `stop_music` signature
+
+```python
+def stop_music(app, fade_out: float = 0.0) -> None: ...
+```
+
+<Tip>
+To cross-fade between two tracks, call `stop_music(app, fade_out=N)` and then immediately `play_music(app, new_path, fade_in=N)`. The outgoing track ramps down while the new one ramps up in parallel.
+</Tip>
+
+---
+
+## Volume Control
+
+Keel has three independent gain channels that multiply together on the way to the hardware:
+
+- **Master** — applies to everything (SFX + music)
+- **SFX** — applies only to one-shot sounds started with `play_sound`
+- **Music** — applies only to the streaming music track
+
+```python
+set_volume(app, master=0.8)           # reduce overall volume to 80%
+set_volume(app, sfx=0.5)              # halve SFX without touching music
+set_volume(app, music=0.3)            # quiet music during cutscene dialogue
+set_volume(app, master=1.0, sfx=0.7, music=0.6)  # set all three at once
+```
+
+### `set_volume` signature
+
+```python
+def set_volume(
+    app,
+    master: float | None = None,
+    sfx: float | None = None,
+    music: float | None = None,
+) -> None: ...
+```
+
+Pass only the keyword arguments you want to change; `None` means "leave unchanged." All values are clamped to `[0.0, 1.0]`.
+
+### Reading current volumes
+
+Access the properties directly on the `AudioEngine`:
+
+```python
+audio = setup_audio(app)
+print(audio.engine.master_volume)
+print(audio.engine.sfx_volume)
+print(audio.engine.music_volume)
+```
+
+---
+
+## AudioSource Component
+
+`keel.AudioSource` is an optional ECS component that binds a sound to an entity's lifetime. It is useful when a sound should live and die with the entity that owns it (a pickup that plays on collect, a turret emitter).
+
+```python
+@keel.component
+# Built-in — already decorated; shown here for reference.
+class AudioSource:
+    sound_id: int = 0    # index into your own sound path registry
+    volume: float = 1.0
+    loop: bool = False
+    auto_play: bool = False
+    playing: bool = False
+```
+
+<Note>
+`AudioSource` does not play audio automatically — Keel ships no built-in system that reads it. It is a data marker: your gameplay system queries for entities with `AudioSource`, decides when to call `play_sound`, and sets `playing = True` to track state. For simple one-shot effects, calling `play_sound(app, path)` directly from a system is simpler.
+</Note>
+
+---
+
+## Supported Formats
+
+The engine uses miniaudio's decoder, which supports:
+
+| Format | Extension | Notes |
+|---|---|---|
+| OGG Vorbis | `.ogg` | Recommended for music tracks |
+| WAV | `.wav` | Recommended for short sound effects |
+| MP3 | `.mp3` | Supported via miniaudio's built-in decoder |
+| FLAC | `.flac` | Supported via miniaudio's built-in decoder |
+
+All formats are decoded to stereo int16 at 44 100 Hz before mixing.
+
+---
+
+## Complete Example
+
+<Steps>
+  <Step title="Install and import">
+    ```bash
+    pip install keelpy
+    ```
+
+    ```python
+    import keel
+    from keel.audio import setup_audio, play_sound, play_music, stop_music, set_volume
+    from keel.renderer import setup_renderer_2d
+    ```
+  </Step>
+
+  <Step title="Create the app and set up audio">
+    ```python
+    app = keel.App(title="Audio Demo", width=800, height=600)
+    setup_renderer_2d(app)
+    audio = setup_audio(app)
+
+    # Set starting volume levels.
+    set_volume(app, master=1.0, sfx=0.8, music=0.5)
+    ```
+  </Step>
+
+  <Step title="Start background music on launch">
+    ```python
+    play_music(app, "assets/music/theme.ogg", loop=True, fade_in=2.0)
+    ```
+  </Step>
+
+  <Step title="Play sound effects in a system">
+    ```python
+    @app.system(keel.Phase.UPDATE)
+    def handle_input(world, dt):
+        for ev in world.read_events(keel.KeyEvent):
+            if ev.action == keel.PRESS:
+                if ev.key == keel.KEY_SPACE:
+                    play_sound(app, "assets/sounds/jump.wav", volume=0.9)
+
+                elif ev.key == keel.KEY_ESCAPE:
+                    # Fade out the music over one second, then quit.
+                    stop_music(app, fade_out=1.0)
+                    app.window.close()
+    ```
+  </Step>
+
+  <Step title="Run">
+    ```python
+    app.run()
+    ```
+  </Step>
+</Steps>
+
+---
+
+## API Quick Reference
+
+| Function / Method | Description |
+|---|---|
+| `setup_audio(app)` | Initialize the audio engine; returns `AudioSetup`. Idempotent. |
+| `play_sound(app, path, volume=1.0, loop=False)` | Play a one-shot or looping SFX; returns `SoundHandle`. |
+| `stop_sound(app, handle)` | Stop a specific sound by handle. |
+| `play_music(app, path, loop=True, fade_in=0.0)` | Stream a music track, replacing any current track. |
+| `stop_music(app, fade_out=0.0)` | Stop music, optionally ramping gain down first. |
+| `set_volume(app, master=None, sfx=None, music=None)` | Update any combination of the three gain channels. |
+| `audio.engine.is_playing(handle)` | `True` while the handle's sound is still active. |
+| `audio.engine.is_music_playing()` | `True` while music is active, including during fade-out. |

@@ -1,0 +1,295 @@
+---
+title: "Audio Module: Playback, Music, and Volume"
+sidebarTitle: "Audio API"
+description: "setup_audio creates the miniaudio-backed AudioEngine. play_sound plays one-shot effects, play_music streams background tracks, and set_volume controls per-channel levels."
+---
+
+Keel's audio system is backed by [miniaudio](https://github.com/irmen/pyminiaudio) — a single stereo playback device running at 44.1 kHz / signed-16-bit. Sound effects are decoded once into a cache and mixed in a background thread; music is streamed file-by-file. The public API is a handful of module-level functions that delegate to an `AudioEngine` world resource.
+
+**Requires:** `pip install miniaudio`.
+
+---
+
+## Setup
+
+### `setup_audio`
+
+```python
+def setup_audio(app: Any) -> AudioSetup
+```
+
+Creates an `AudioEngine`, inserts it as a world resource, and registers a `Phase.PRE_UPDATE` system that calls `engine.update(dt)` each frame to drain finished SFX handles and advance music fades. Also registers `engine.shutdown` as an app shutdown hook. Idempotent.
+
+```python
+import keel
+
+app = keel.App()
+audio = keel.setup_audio(app)
+```
+
+#### `AudioSetup` fields
+
+<ParamField path="engine" type="AudioEngine">
+  The wired `AudioEngine` instance. Most users interact with the module-level helpers (`play_sound`, `play_music`, etc.) rather than the engine directly. Use `audio.engine` when you need lower-level access such as `engine.is_playing(handle)` or `engine.is_music_playing()`.
+</ParamField>
+
+---
+
+## Sound effects
+
+### `play_sound`
+
+```python
+def play_sound(
+    app: Any,
+    path: str,
+    volume: float = 1.0,
+    loop: bool = False,
+) -> SoundHandle
+```
+
+Decode `path` (if not already cached) and start playback. Returns a `SoundHandle` you can pass to `stop_sound` to cancel it early. Multiple simultaneous plays of the same file are supported — each returns a distinct handle.
+
+Supported formats: `.wav`, `.mp3`, `.ogg`, `.flac` (all miniaudio-supported formats).
+
+```python
+import keel
+
+# One-shot effect
+handle = keel.play_sound(app, "assets/explosion.wav", volume=0.8)
+
+# Looping ambient sound
+ambient = keel.play_sound(app, "assets/wind.ogg", volume=0.4, loop=True)
+
+# Stop it later
+keel.stop_sound(app, ambient)
+```
+
+<ParamField path="app" type="Any">
+  The Keel `App` instance. The function looks up `AudioEngine` from `app.world`.
+</ParamField>
+
+<ParamField path="path" type="str">
+  Path to the audio file. Decoded and cached in memory on first play; subsequent calls with the same path are free (no disk I/O). Raises `FileNotFoundError` if the path does not exist.
+</ParamField>
+
+<ParamField path="volume" type="float" default="1.0">
+  Per-instance playback volume, clamped to `[0.0, 1.0]`. Multiplied by the SFX channel gain and master gain in the mixer.
+</ParamField>
+
+<ParamField path="loop" type="bool" default="False">
+  When `True`, the sound restarts from the beginning when it reaches the end.
+</ParamField>
+
+**Returns:** `SoundHandle` — an opaque, hashable, frozen dataclass wrapping a monotonically increasing integer `id` and the source `path`. Equality and hashing are by `id` only.
+
+---
+
+### `stop_sound`
+
+```python
+def stop_sound(app: Any, handle: SoundHandle) -> None
+```
+
+Stop the sound referenced by `handle`. The effect is immediate — the mixer drops the `_PlayState` before the next audio callback. No-op if the handle is unknown or already finished.
+
+```python
+keel.stop_sound(app, explosion_handle)
+```
+
+---
+
+### `SoundHandle`
+
+`SoundHandle` is a frozen dataclass (`@dataclass(frozen=True)`) returned by `play_sound`. Store it if you need to stop or check a specific sound instance.
+
+```python
+handle = keel.play_sound(app, "assets/beep.wav")
+
+# Check if still playing (via the engine directly)
+still_playing = audio.engine.is_playing(handle)
+
+# Stop early
+keel.stop_sound(app, handle)
+```
+
+<ParamField path="id" type="int">
+  Monotonically increasing integer identifying this particular play instance. Unique per `AudioEngine` lifetime.
+</ParamField>
+
+<ParamField path="path" type="str">
+  The file path that was passed to `play_sound`. Informational only.
+</ParamField>
+
+---
+
+## Music streaming
+
+### `play_music`
+
+```python
+def play_music(
+    app: Any,
+    path: str,
+    loop: bool = True,
+    fade_in: float = 0.0,
+) -> None
+```
+
+Stream `path` as background music, replacing any currently playing track. Only one music stream plays at a time. Music is streamed rather than decoded fully into memory, making it suitable for long tracks.
+
+```python
+keel.play_music(app, "assets/theme.ogg", loop=True, fade_in=2.0)
+```
+
+<ParamField path="path" type="str">
+  Path to the audio file to stream. Raises `FileNotFoundError` if the path does not exist.
+</ParamField>
+
+<ParamField path="loop" type="bool" default="True">
+  When `True`, the stream restarts from the beginning when it reaches the end.
+</ParamField>
+
+<ParamField path="fade_in" type="float" default="0.0">
+  Fade-in duration in seconds. When `> 0`, the music starts at gain `0.0` and ramps up to the current music volume over `fade_in` seconds. Fade progress is advanced by `engine.update(dt)` on the main thread.
+</ParamField>
+
+---
+
+### `stop_music`
+
+```python
+def stop_music(app: Any, fade_out: float = 0.0) -> None
+```
+
+Stop the active music stream. If `fade_out > 0`, the gain ramps to `0.0` over the specified number of seconds before the stream is discarded. No-op if no music is playing.
+
+```python
+keel.stop_music(app)              # immediate
+keel.stop_music(app, fade_out=1.5)  # 1.5-second fade
+```
+
+<ParamField path="fade_out" type="float" default="0.0">
+  Fade-out duration in seconds. `0.0` stops immediately.
+</ParamField>
+
+---
+
+## Volume control
+
+### `set_volume`
+
+```python
+def set_volume(
+    app: Any,
+    master: Optional[float] = None,
+    sfx: Optional[float] = None,
+    music: Optional[float] = None,
+) -> None
+```
+
+Update any combination of master, SFX, and music gain levels. Pass `None` for any channel you want to leave unchanged. All values are clamped to `[0.0, 1.0]`.
+
+The mixer's effective gain hierarchy is:
+
+```
+final_sfx_sample   = sample × voice_volume × sfx_gain × master_gain
+final_music_sample = sample × music_volume × master_gain
+```
+
+```python
+# Mute everything
+keel.set_volume(app, master=0.0)
+
+# Halve SFX only
+keel.set_volume(app, sfx=0.5)
+
+# Full settings
+keel.set_volume(app, master=0.9, sfx=0.8, music=0.6)
+```
+
+<ParamField path="master" type="Optional[float]" default="None">
+  Master gain applied to all output (SFX + music). `None` = leave unchanged.
+</ParamField>
+
+<ParamField path="sfx" type="Optional[float]" default="None">
+  SFX channel gain applied to all one-shot and looping sound effects. `None` = leave unchanged.
+</ParamField>
+
+<ParamField path="music" type="Optional[float]" default="None">
+  Music channel gain applied to the active music stream. `None` = leave unchanged. Re-aims any active fade's target gain.
+</ParamField>
+
+---
+
+## `AudioEngine`
+
+`AudioEngine` is the low-level class that owns the miniaudio `PlaybackDevice`, the SFX cache, the active sound table, and the at-most-one music stream. It is inserted as a world resource by `setup_audio` and can be injected into systems.
+
+You generally do not need to use `AudioEngine` directly — the module-level functions cover all common cases. The engine is useful for status queries:
+
+```python
+@app.system(keel.Phase.UPDATE)
+def music_watcher(world, dt, engine: keel.AudioEngine):
+    if not engine.is_music_playing():
+        keel.play_music(app, "assets/next_track.ogg")
+```
+
+### Properties
+
+<ParamField path="master_volume" type="float">Current master gain. Read-only property; use `set_master_volume` to change it.</ParamField>
+<ParamField path="sfx_volume" type="float">Current SFX channel gain.</ParamField>
+<ParamField path="music_volume" type="float">Current music channel gain.</ParamField>
+
+### Key methods
+
+<ParamField path="is_playing(handle: SoundHandle) -> bool" type="method">
+  Returns `True` if the sound referenced by `handle` is still active and not yet finished.
+</ParamField>
+
+<ParamField path="is_music_playing() -> bool" type="method">
+  Returns `True` while a music stream is active, including during a fade-out ramp.
+</ParamField>
+
+<ParamField path="stop_all()" type="method">
+  Stop every active SFX instance and the music stream simultaneously.
+</ParamField>
+
+<ParamField path="shutdown()" type="method">
+  Stop all playback and close the miniaudio device. Called automatically by `App.run()` on exit. Idempotent.
+</ParamField>
+
+---
+
+## Supported audio formats
+
+| Format | Extension | Notes |
+|---|---|---|
+| WAV | `.wav` | Uncompressed or PCM; fastest decode |
+| MP3 | `.mp3` | Requires miniaudio's libmp3lame backend |
+| OGG Vorbis | `.ogg` | Recommended for music |
+| FLAC | `.flac` | Lossless |
+
+All SFX are decoded once to **stereo int16 at 44.1 kHz** and cached. Music is streamed in the same format without full in-memory decode.
+
+---
+
+## Full example
+
+```python
+import keel
+
+app = keel.App(title="Audio Demo", width=800, height=600)
+keel.setup_renderer_2d(app)
+keel.setup_audio(app)
+
+keel.play_music(app, "assets/bgm.ogg", loop=True, fade_in=1.0)
+keel.set_volume(app, master=0.8, sfx=1.0, music=0.6)
+
+@app.system(keel.Phase.UPDATE)
+def on_player_shoot(world, dt, input: keel.InputState):
+    if input.is_key_pressed(keel.KEY_SPACE):
+        keel.play_sound(app, "assets/shoot.wav", volume=0.9)
+
+app.run()
+```

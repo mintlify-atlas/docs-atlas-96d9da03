@@ -1,0 +1,374 @@
+---
+title: "Physics Components: RigidBody, Collider, and Enums"
+sidebarTitle: "Physics"
+description: "RigidBody2D and Collider2D configure 2D pymunk physics. RigidBody3D and Collider3D configure 3D pybullet physics. BodyType and ShapeType enums control behavior."
+---
+
+Keel's physics components are pure ECS data — they carry no pymunk or pybullet objects themselves. The `Physics2D` and `Physics3D` bridges read these fields on every `Phase.POST_UPDATE` tick, create or update the underlying simulation objects, advance the solver, and write results back into `Transform2D` / `Transform3D`. You describe what you want; the bridge makes it happen.
+
+---
+
+## Enums
+
+### BodyType
+
+Shared by 2D and 3D. `BodyType` is an `IntEnum`, so `BodyType.STATIC == 1` is `True` and raw integer literals work everywhere.
+
+```python
+import keel
+
+# Preferred
+keel.RigidBody2D(body_type=keel.BodyType.DYNAMIC)
+
+# Also valid — IntEnum
+keel.RigidBody2D(body_type=0)
+```
+
+| Value | Int | Description |
+|---|---|---|
+| `BodyType.DYNAMIC` | `0` | Affected by gravity, forces, and impulses. Collides with everything. Emits `CollisionEvent2D` / `CollisionEvent3D`. |
+| `BodyType.STATIC` | `1` | Immovable. Emits collision events when a dynamic body touches it. Does not emit events against kinematic bodies (pymunk limitation). |
+| `BodyType.KINEMATIC` | `2` | Moved manually via `Physics2D.set_velocity` / `set_position`. Does **not** emit `CollisionEvent2D` against another kinematic or static body. Use `DYNAMIC` for entities that must detect mutual collisions. |
+
+<Warning>
+  pymunk does not fire collision callbacks for KINEMATIC-vs-KINEMATIC or KINEMATIC-vs-STATIC pairs. Physics2D issues a one-time `UserWarning` when such a pairing is first detected. If you need mutual collision detection, use `BodyType.DYNAMIC` for at least one participant.
+</Warning>
+
+---
+
+### ShapeType2D
+
+Selects the pymunk shape built for a `Collider2D`.
+
+| Value | Int | Active fields |
+|---|---|---|
+| `ShapeType2D.CIRCLE` | `0` | `radius` |
+| `ShapeType2D.BOX` | `1` | `width`, `height` |
+| `ShapeType2D.SEGMENT` | `2` | `width` (segment half-length × 2, thickness = 1 px) |
+
+---
+
+### ShapeType3D
+
+Selects the pybullet collision shape built for a `Collider3D`.
+
+| Value | Int | Active fields |
+|---|---|---|
+| `ShapeType3D.SPHERE` | `0` | `radius` |
+| `ShapeType3D.BOX` | `1` | `size_x`, `size_y`, `size_z` |
+| `ShapeType3D.CAPSULE` | `2` | `radius`, `size_y` (total height) |
+| `ShapeType3D.MESH` | `3` | `mesh_id` (index into `MeshRegistry`) |
+
+---
+
+## 2D Components
+
+### RigidBody2D
+
+`RigidBody2D` carries the mass, moment of inertia, velocity, angular velocity, and simulation mode for a 2D entity. It must appear alongside `Transform2D` and `Collider2D` on the same entity — missing any one of the three causes the entity to be skipped with a `RuntimeWarning`.
+
+```python
+import keel
+
+# A 1 kg dynamic body with initial upward velocity
+app.world.spawn(
+    keel.Transform2D(x=200.0, y=100.0),
+    keel.RigidBody2D(
+        mass=1.0,
+        vel_y=300.0,
+        body_type=keel.BodyType.DYNAMIC,
+        damping=0.01,
+    ),
+    keel.Collider2D(shape_type=keel.ShapeType2D.CIRCLE, radius=16.0),
+)
+```
+
+#### Fields
+
+<ParamField path="mass" type="float" default="1.0">
+  Mass in grams (pymunk uses centimeter-gram-second units when gravity is `−980.0`). Only meaningful for `DYNAMIC` bodies. `STATIC` and `KINEMATIC` bodies ignore this field.
+</ParamField>
+
+<ParamField path="moment" type="float" default="0.0">
+  Moment of inertia. When `0.0`, Physics2D auto-computes an appropriate moment from the collider shape and mass. Set explicitly only if you need non-standard rotational behavior.
+</ParamField>
+
+<ParamField path="vel_x" type="float" default="0.0">
+  Initial (or externally set) linear velocity along X in pixels per second. Updated each frame by `sync_from_physics`.
+</ParamField>
+
+<ParamField path="vel_y" type="float" default="0.0">
+  Initial (or externally set) linear velocity along Y in pixels per second.
+</ParamField>
+
+<ParamField path="ang_vel" type="float" default="0.0">
+  Angular velocity in radians per second. Positive = counterclockwise.
+</ParamField>
+
+<ParamField path="damping" type="float" default="0.0">
+  Linear velocity damping coefficient passed to pymunk. `0.0` is no damping; values closer to `1.0` create strong air resistance. Note: pymunk's damping is per-body, not per-space.
+</ParamField>
+
+<ParamField path="body_type" type="int" default="0">
+  Simulation mode. Use `keel.BodyType.DYNAMIC` (`0`), `keel.BodyType.STATIC` (`1`), or `keel.BodyType.KINEMATIC` (`2`). Raw integers are accepted because `BodyType` is an `IntEnum`.
+</ParamField>
+
+---
+
+### Collider2D
+
+`Collider2D` defines the collision shape attached to the pymunk body. Which size fields are used depends on `shape_type`.
+
+```python
+import keel
+
+# Circle collider
+keel.Collider2D(shape_type=keel.ShapeType2D.CIRCLE, radius=20.0)
+
+# Box collider
+keel.Collider2D(shape_type=keel.ShapeType2D.BOX, width=64.0, height=32.0)
+
+# Sensor (trigger) — emits collision events but doesn't resolve overlap
+keel.Collider2D(shape_type=keel.ShapeType2D.CIRCLE, radius=48.0, sensor=True)
+```
+
+#### Fields
+
+<ParamField path="shape_type" type="int" default="0">
+  Selects the pymunk shape: `ShapeType2D.CIRCLE` (`0`), `ShapeType2D.BOX` (`1`), or `ShapeType2D.SEGMENT` (`2`).
+</ParamField>
+
+<ParamField path="width" type="float" default="32.0">
+  Width for `BOX` shapes, or the full length for `SEGMENT` shapes (the half-length is `width / 2`). Ignored for `CIRCLE`.
+</ParamField>
+
+<ParamField path="height" type="float" default="32.0">
+  Height for `BOX` shapes. Ignored for `CIRCLE` and `SEGMENT`.
+</ParamField>
+
+<ParamField path="radius" type="float" default="16.0">
+  Radius for `CIRCLE` shapes. Ignored for `BOX` and `SEGMENT`.
+</ParamField>
+
+<ParamField path="friction" type="float" default="0.5">
+  Surface friction coefficient. Overridden by `PhysicsMaterial2D` if `apply_material` was called on this entity. Typical range `[0.0, 1.0]`.
+</ParamField>
+
+<ParamField path="elasticity" type="float" default="0.3">
+  Bounciness / restitution. `0.0` = no bounce, `1.0` = perfectly elastic. Overridden by `PhysicsMaterial2D` if applied.
+</ParamField>
+
+<ParamField path="sensor" type="bool" default="False">
+  When `True`, the shape is a trigger zone — it detects overlap and emits `CollisionEvent2D` but does not physically resolve the contact. Bodies pass through the sensor.
+</ParamField>
+
+<ParamField path="category_bits" type="int" default="1">
+  Bitmask identifying which collision category this shape belongs to. Used with `mask_bits` to implement selective collision layers.
+</ParamField>
+
+<ParamField path="mask_bits" type="int" default="0xFFFF">
+  Bitmask of categories this shape collides with. A contact fires only when `(A.category_bits & B.mask_bits) != 0` and `(B.category_bits & A.mask_bits) != 0`.
+</ParamField>
+
+---
+
+## 3D Components
+
+### RigidBody3D
+
+`RigidBody3D` is the 3D analogue of `RigidBody2D`, backed by pybullet's DIRECT-mode rigid body. All three linear and angular velocity components are present.
+
+```python
+import keel
+
+app.world.spawn(
+    keel.Transform3D(x=0.0, y=5.0, z=-3.0),
+    keel.RigidBody3D(mass=1.0, body_type=keel.BodyType.DYNAMIC, damping=0.1),
+    keel.Collider3D(shape_type=keel.ShapeType3D.SPHERE, radius=0.5),
+)
+```
+
+#### Fields
+
+<ParamField path="mass" type="float" default="1.0">
+  Mass in kilograms (pybullet uses SI units when gravity is `−9.81`). Only meaningful for `DYNAMIC` bodies.
+</ParamField>
+
+<ParamField path="vel_x" type="float" default="0.0">
+  Linear velocity along X in meters per second. Updated each frame by `sync_from_physics`.
+</ParamField>
+
+<ParamField path="vel_y" type="float" default="0.0">
+  Linear velocity along Y in meters per second.
+</ParamField>
+
+<ParamField path="vel_z" type="float" default="0.0">
+  Linear velocity along Z in meters per second.
+</ParamField>
+
+<ParamField path="ang_vel_x" type="float" default="0.0">
+  Angular velocity around X in radians per second.
+</ParamField>
+
+<ParamField path="ang_vel_y" type="float" default="0.0">
+  Angular velocity around Y in radians per second.
+</ParamField>
+
+<ParamField path="ang_vel_z" type="float" default="0.0">
+  Angular velocity around Z in radians per second.
+</ParamField>
+
+<ParamField path="damping" type="float" default="0.0">
+  Linear damping fraction per second (pybullet `linearDamping`). `0.0` = none.
+</ParamField>
+
+<ParamField path="ang_damping" type="float" default="0.0">
+  Angular damping fraction per second (pybullet `angularDamping`). `0.0` = none.
+</ParamField>
+
+<ParamField path="body_type" type="int" default="0">
+  Simulation mode. Same `BodyType` enum as 2D: `DYNAMIC` (`0`), `STATIC` (`1`), `KINEMATIC` (`2`).
+</ParamField>
+
+---
+
+### Collider3D
+
+`Collider3D` defines the pybullet collision shape. The `MESH` shape type uses a triangle mesh from the `MeshRegistry`.
+
+```python
+import keel
+
+# Sphere
+keel.Collider3D(shape_type=keel.ShapeType3D.SPHERE, radius=0.5)
+
+# Box
+keel.Collider3D(shape_type=keel.ShapeType3D.BOX, size_x=1.0, size_y=1.0, size_z=1.0)
+
+# Capsule (radius + total height)
+keel.Collider3D(shape_type=keel.ShapeType3D.CAPSULE, radius=0.3, size_y=1.8)
+
+# Mesh (concave collision from a registered mesh)
+keel.Collider3D(shape_type=keel.ShapeType3D.MESH, mesh_id=terrain_mesh_id)
+```
+
+#### Fields
+
+<ParamField path="shape_type" type="int" default="0">
+  Selects the pybullet collision shape: `SPHERE` (`0`), `BOX` (`1`), `CAPSULE` (`2`), `MESH` (`3`).
+</ParamField>
+
+<ParamField path="size_x" type="float" default="1.0">
+  Half-extent along X for `BOX` shapes. The full box width is `2 × size_x`. Ignored for other shape types.
+</ParamField>
+
+<ParamField path="size_y" type="float" default="1.0">
+  Half-extent along Y for `BOX`, or total height for `CAPSULE`.
+</ParamField>
+
+<ParamField path="size_z" type="float" default="1.0">
+  Half-extent along Z for `BOX` shapes.
+</ParamField>
+
+<ParamField path="radius" type="float" default="0.5">
+  Radius for `SPHERE` and `CAPSULE` shapes.
+</ParamField>
+
+<ParamField path="friction" type="float" default="0.5">
+  Surface friction coefficient passed to pybullet's `lateralFriction`. Typical range `[0.0, 1.0]`.
+</ParamField>
+
+<ParamField path="restitution" type="float" default="0.3">
+  Bounciness passed to pybullet's `restitution`. `0.0` = no bounce, `1.0` = perfectly elastic.
+</ParamField>
+
+<ParamField path="mesh_id" type="int" default="0">
+  `MeshRegistry` ID to use when `shape_type == ShapeType3D.MESH`. The mesh must already be registered before the entity is synced to physics.
+</ParamField>
+
+---
+
+## Collision Events
+
+### CollisionEvent2D
+
+Emitted by `Physics2D` every tick that two collidable shapes are in contact.
+
+<ParamField path="entity_a" type="int">
+  Entity ID of the first participant.
+</ParamField>
+
+<ParamField path="entity_b" type="int">
+  Entity ID of the second participant.
+</ParamField>
+
+<ParamField path="normal_x" type="float">
+  X component of the contact normal (pointing from B toward A). `0.0` for sensor contacts.
+</ParamField>
+
+<ParamField path="normal_y" type="float">
+  Y component of the contact normal. `0.0` for sensor contacts.
+</ParamField>
+
+<ParamField path="impulse" type="float">
+  Magnitude of the impulse applied to resolve the contact. `0.0` for sensor contacts.
+</ParamField>
+
+### CollisionEvent3D
+
+Emitted by `Physics3D` every tick that two pybullet bodies report a contact point.
+
+<ParamField path="entity_a" type="int">Entity ID of the first participant.</ParamField>
+<ParamField path="entity_b" type="int">Entity ID of the second participant.</ParamField>
+<ParamField path="contact_x" type="float">X coordinate of the contact point in world space.</ParamField>
+<ParamField path="contact_y" type="float">Y coordinate of the contact point.</ParamField>
+<ParamField path="contact_z" type="float">Z coordinate of the contact point.</ParamField>
+<ParamField path="normal_x" type="float">X component of the contact normal.</ParamField>
+<ParamField path="normal_y" type="float">Y component of the contact normal.</ParamField>
+<ParamField path="normal_z" type="float">Z component of the contact normal.</ParamField>
+
+```python
+@app.system(keel.Phase.UPDATE)
+def on_hit(world, dt):
+    for event in world.read_events(keel.CollisionEvent2D):
+        print(f"Entity {event.entity_a} hit entity {event.entity_b}, impulse={event.impulse:.1f}")
+```
+
+---
+
+## PhysicsMaterial2D
+
+`PhysicsMaterial2D` is a reusable preset that overrides a `Collider2D` component's `friction` and `elasticity` at body-creation time. Apply it with `keel.apply_material(world, entity_id, material)` immediately after spawning and flushing the entity.
+
+```python
+import keel
+
+app.world.flush()
+entity = app.world.spawn(
+    keel.Transform2D(x=100.0, y=100.0),
+    keel.RigidBody2D(body_type=keel.BodyType.DYNAMIC),
+    keel.Collider2D(shape_type=keel.ShapeType2D.BOX, width=32.0, height=32.0),
+)
+app.world.flush()
+keel.apply_material(app.world, entity, keel.PhysicsMaterial2D.BOUNCY)
+```
+
+### Built-in presets
+
+| Preset | `friction` | `elasticity` |
+|---|---|---|
+| `PhysicsMaterial2D.DEFAULT` | `0.50` | `0.30` |
+| `PhysicsMaterial2D.BOUNCY` | `0.30` | `0.90` |
+| `PhysicsMaterial2D.ICE` | `0.05` | `0.10` |
+| `PhysicsMaterial2D.RUBBER` | `0.90` | `0.80` |
+| `PhysicsMaterial2D.WOOD` | `0.60` | `0.20` |
+| `PhysicsMaterial2D.METAL` | `0.30` | `0.10` |
+
+You can also create custom materials:
+
+```python
+from keel import PhysicsMaterial2D
+
+sticky = PhysicsMaterial2D(friction=1.2, elasticity=0.05)
+keel.apply_material(app.world, wall_entity, sticky)
+```

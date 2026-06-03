@@ -1,0 +1,199 @@
+---
+title: "Camera Setup: 2D Orthographic and 3D Perspective"
+sidebarTitle: "Camera"
+description: "Keel provides Camera2D for orthographic 2D rendering with pan, rotation, and zoom, and Camera3D for perspective 3D rendering with yaw/pitch orientation."
+---
+
+Keel separates camera concerns cleanly from the renderer: cameras are plain ECS components on ordinary entities. The 2D and 3D renderers each query for their respective camera component at the start of every frame and build the appropriate transformation matrix from it. No camera object needs to be registered or injected — spawning the entity is all that is required.
+
+## Camera2D — Orthographic
+
+`Camera2D` drives the sprite renderer's orthographic projection. It maps world coordinates into normalised device coordinates with an optional zoom factor and rotation. The renderer reads the first `Camera2D` entity it finds in the world.
+
+### Component fields
+
+```python
+@keel.component
+class Camera2D:
+    x: float = 0.0        # world position of the camera centre
+    y: float = 0.0
+    zoom: float = 1.0     # >1 zooms in, <1 zooms out
+    rotation: float = 0.0 # rotation in radians (CCW)
+```
+
+### Spawning a Camera2D
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+
+app = keel.App(title="My Game", width=800, height=600)
+setup_renderer_2d(app)
+
+camera_entity = app.world.spawn(
+    keel.Camera2D(x=400.0, y=300.0, zoom=1.0),
+)
+```
+
+<Note>
+When no `Camera2D` entity exists, the renderer falls back to a default orthographic camera centred on the framebuffer, so spawning in pixel coordinates "just works." Spawn an explicit `Camera2D` whenever you need to pan, zoom, or rotate the view.
+</Note>
+
+### Default camera behaviour
+
+Without an explicit `Camera2D`, the renderer centres the view at `(width / 2, height / 2)`. World coordinates map directly to screen pixels — an entity at `(400, 300)` on an 800×600 window appears at the centre of the screen.
+
+### Moving the camera in a system
+
+Write to the `Camera2D` component through `world.set` for one-off moves, or iterate `world.query(keel.Camera2D)` for in-place bulk mutation:
+
+```python
+# One-off update — snap the camera to a position.
+world.set(camera_entity, keel.Camera2D, x=player_x, y=player_y)
+
+# In-place mutation inside a system — follow the player every frame.
+@app.system(keel.Phase.UPDATE)
+def follow_player(world, dt):
+    for transforms, _ in world.query(keel.Transform2D, Player):
+        for i in range(len(transforms)):
+            px = float(transforms["x"][i])
+            py = float(transforms["y"][i])
+
+    for cameras in world.query(keel.Camera2D):
+        if len(cameras[0]) > 0:
+            cameras[0]["x"][0] = px
+            cameras[0]["y"][0] = py
+```
+
+### Zooming and rotation
+
+```python
+# Zoom in smoothly (zoom > 1 means closer).
+world.set(camera_entity, keel.Camera2D, zoom=2.0)
+
+# Rotate the entire world view by 45 degrees.
+import math
+world.set(camera_entity, keel.Camera2D, rotation=math.radians(45))
+```
+
+The projection matrix is rebuilt from the component values every frame, so any changes take effect immediately on the next render tick.
+
+---
+
+## Camera3D — Perspective
+
+`Camera3D` drives the 3D renderer's perspective projection. Position is stored as `x`, `y`, `z`; orientation is expressed as Euler angles (`yaw`, `pitch`, `roll`) applied in Y → X → Z order. The renderer reads the first `Camera3D` entity in the world.
+
+### Component fields
+
+```python
+@keel.component
+class Camera3D:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    pitch: float = 0.0       # rotation around the X axis (radians)
+    yaw: float = 0.0         # rotation around the Y axis (radians)
+    roll: float = 0.0        # rotation around the Z axis (radians)
+    fov: float = 1.0472      # field of view in radians (~60°)
+    near: float = 0.1        # near clip plane
+    far: float = 1000.0      # far clip plane
+```
+
+### Spawning a Camera3D
+
+```python
+import keel, math
+from keel.renderer3d import setup_renderer_3d
+
+app = keel.App(title="3D Scene", width=800, height=600)
+setup_renderer_3d(app)
+
+app.world.spawn(keel.Camera3D(
+    x=3.0, y=3.0, z=5.0,
+    fov=math.radians(60.0),
+    near=0.1,
+    far=100.0,
+))
+```
+
+### Pointing the camera at a target
+
+To aim `Camera3D` at a world-space target — for example, always looking at the origin — compute `yaw` and `pitch` with `atan2`:
+
+```python
+import math
+
+def look_at_origin(cam_x: float, cam_y: float, cam_z: float):
+    """Return (yaw, pitch) for a Camera3D at (cam_x, cam_y, cam_z) aimed at the origin."""
+    yaw   = math.atan2(cam_x, cam_z)
+    pitch = -math.atan2(cam_y, math.sqrt(cam_x ** 2 + cam_z ** 2))
+    return yaw, pitch
+
+cam_yaw, cam_pitch = look_at_origin(3.0, 3.0, 5.0)
+
+app.world.spawn(keel.Camera3D(
+    x=3.0, y=3.0, z=5.0,
+    yaw=cam_yaw,
+    pitch=cam_pitch,
+    fov=math.radians(60.0),
+))
+```
+
+<Tip>
+This `look_at_origin` pattern is used verbatim in `cube_demo.py`. Generalise it by replacing the hard-coded origin with any `(tx, ty, tz)` target: subtract the target from the camera position before passing to `atan2`.
+</Tip>
+
+### Moving the camera in a system
+
+```python
+_cam_angle = 0.0
+
+@app.system(keel.Phase.UPDATE)
+def orbit_camera(world, dt):
+    global _cam_angle
+    _cam_angle += dt * 0.5   # half a radian per second
+
+    radius = 6.0
+    cx = math.sin(_cam_angle) * radius
+    cz = math.cos(_cam_angle) * radius
+
+    yaw, pitch = look_at_origin(cx, 2.0, cz)
+    world.set(camera_entity, keel.Camera3D,
+              x=cx, y=2.0, z=cz,
+              yaw=yaw, pitch=pitch)
+```
+
+### Field of view
+
+`fov` is in **radians**. Use `math.radians(deg)` to convert from degrees. Values must be in the range `(0, π)`. A common starting point is `math.radians(60)` (≈ 1.047 rad).
+
+---
+
+## One Camera Per Scene
+
+<CardGroup cols={2}>
+  <Card title="Standard pattern" icon="check">
+    Spawn exactly one `Camera2D` (for 2D scenes) or one `Camera3D` (for 3D scenes) per app. The renderer reads the **first** one it finds.
+  </Card>
+  <Card title="What happens with multiple cameras" icon="triangle-exclamation">
+    If multiple `Camera2D` (or `Camera3D`) entities exist, only the first one encountered during `world.query` is used. The rest are silently ignored.
+  </Card>
+</CardGroup>
+
+### Using both renderers at once
+
+When both `setup_renderer_2d` and `setup_renderer_3d` are active, spawn one `Camera2D` and one `Camera3D`. The two renderers query independently — `Camera2D` is invisible to the 3D pass and vice versa. This is the intended pattern for games with a 3D world and a 2D HUD.
+
+```python
+setup_renderer_2d(app)
+setup_renderer_3d(app)
+setup_text(app)
+
+# 3D world view.
+app.world.spawn(keel.Camera3D(x=0.0, y=2.0, z=5.0, fov=math.radians(60)))
+
+# 2D HUD camera — no spawn needed if the default centred camera is fine,
+# but spawn one explicitly to control HUD zoom or offset.
+app.world.spawn(keel.Camera2D(x=400.0, y=300.0))
+```

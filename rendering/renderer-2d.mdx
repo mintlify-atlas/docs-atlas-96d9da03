@@ -1,0 +1,210 @@
+---
+title: "2D Rendering with Sprites and Texture Atlas"
+sidebarTitle: "2D Renderer"
+description: "Keel's 2D renderer uses an instanced sprite batcher with a 16-unit texture atlas. Call setup_renderer_2d(app) to register the render system, then spawn Sprite entities."
+---
+
+Keel's 2D renderer is built around a single instanced draw call per texture group. You register it once with `setup_renderer_2d(app)`, spawn entities that carry both a `Transform2D` and a `Sprite` component, and the renderer handles everything else — uploading per-instance data to the GPU, grouping sprites by `texture_id`, and issuing one `glDrawArraysInstanced` call per group each frame.
+
+## Setup
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+
+app = keel.App(title="My Game", width=800, height=600)
+renderer = setup_renderer_2d(app)
+```
+
+`setup_renderer_2d(app)` registers a system at `Phase.RENDER` and returns a `Renderer2DSetup` dataclass:
+
+| Field | Type | Description |
+|---|---|---|
+| `atlas` | `TextureAtlas` | The shared texture atlas (up to 16 slots). |
+| `shader_cache` | `ShaderCache` | The compiled sprite shader. |
+| `sprite_batch` | `SpriteBatch2D` | The instanced batcher that issues draw calls. |
+| `render_system` | `Callable` | The registered render function (for reference). |
+
+The call is idempotent — a second call returns the already-registered setup without creating a duplicate system.
+
+## The Sprite Component
+
+```python
+@keel.component
+class Sprite:
+    texture_id: int = 0
+    r: float = 1.0
+    g: float = 1.0
+    b: float = 1.0
+    a: float = 1.0
+    width: float = 64.0
+    height: float = 64.0
+    flip_x: bool = False
+    flip_y: bool = False
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `texture_id` | `0` | Index into the `TextureAtlas`. `0` is always the built-in white pixel. |
+| `r`, `g`, `b` | `1.0` | RGB tint multiplied into the sampled texel. |
+| `a` | `1.0` | Alpha (opacity). |
+| `width`, `height` | `64.0` | Sprite size in world-space units (pixels by default). |
+| `flip_x`, `flip_y` | `False` | Mirror the sprite on that axis. |
+
+<Note>
+`texture_id=0` is always a 1×1 white pixel texture that Keel pre-loads at startup. You can use it immediately without loading any image file — set `r`, `g`, `b` to tint it any solid colour you like.
+</Note>
+
+## The Transform2D Component
+
+Every sprite needs a `Transform2D` on the same entity to provide its world-space position:
+
+```python
+keel.Transform2D(
+    x=400.0,      # world x position
+    y=300.0,      # world y position
+    rotation=0.0, # rotation in radians (CCW)
+    scale_x=1.0,  # horizontal scale multiplied into sprite width
+    scale_y=1.0,  # vertical scale multiplied into sprite height
+)
+```
+
+The batcher reads `Transform2D.x`, `Transform2D.y`, `Transform2D.rotation`, `Transform2D.scale_x`, and `Transform2D.scale_y` from ECS column views each frame. There is no per-entity overhead for components you don't touch.
+
+## Loading Textures
+
+Textures are loaded through the `TextureAtlas` returned by `setup_renderer_2d`. Each loaded image claims one of the 16 available texture units. The atlas caches by path, so calling `load` twice with the same path returns the same ID.
+
+```python
+renderer = setup_renderer_2d(app)
+
+# Load an image from disk. Returns an integer texture_id.
+player_tex = renderer.atlas.load("assets/player.png")
+background_tex = renderer.atlas.load("assets/background.png")
+
+# Use the id on a Sprite component.
+app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.Sprite(texture_id=player_tex, width=48.0, height=48.0),
+)
+```
+
+<Warning>
+The atlas supports at most **16 texture units** — a hard limit imposed by OpenGL's guaranteed minimum. Attempting to load a 17th texture raises a `RuntimeError`. Plan your texture budget accordingly and combine sprites into sprite sheets where possible.
+</Warning>
+
+If you have set up the asset registry via `setup_assets(app)` before calling `setup_renderer_2d`, image files loaded through `registry.load("foo.png")` are automatically routed through the atlas and return the same integer IDs.
+
+### Texture Filtering
+
+Textures are loaded with `NEAREST` filtering by default, which preserves pixel art crispness. Repeat wrapping is disabled so sprites do not tile at their edges.
+
+### Reloading a Texture
+
+Hot-reload a texture at runtime (for asset watchers or in-editor workflows) without changing its ID:
+
+```python
+renderer.atlas.reload(player_tex)
+```
+
+## Instanced Batching
+
+The batcher collects all `(Transform2D, Sprite)` entity pairs from the world each frame, groups them by `texture_id`, then issues one `glDrawArraysInstanced` call per group. Per-instance data is packed into a numpy `float32` array and uploaded to a dynamic VBO — no Python loop runs on the GPU side.
+
+The instance buffer starts at 4096 sprites and doubles automatically whenever a frame exceeds its capacity.
+
+<Tip>
+Minimize the number of distinct `texture_id` values in your scene to minimize draw calls. Group sprites with the same texture onto contiguous entities so the batcher can batch them into fewer passes.
+</Tip>
+
+## Full Example
+
+The example below is the canonical `hello_sprite.py` that ships with Keel. It creates a blue 64×64 square you can move with WASD or the arrow keys.
+
+```python
+"""hello_sprite.py — the smallest interesting Keel program."""
+
+import keel
+from keel.renderer import setup_renderer_2d
+
+WIDTH = 800
+HEIGHT = 600
+SPEED = 250.0
+SCREEN_CX = WIDTH / 2.0
+SCREEN_CY = HEIGHT / 2.0
+
+# ---------------------------------------------------------------------------
+# Custom component
+# ---------------------------------------------------------------------------
+
+@keel.component
+class Hero:
+    speed: float = SPEED
+
+# ---------------------------------------------------------------------------
+# App + renderer
+# ---------------------------------------------------------------------------
+
+app = keel.App(title="Hello Sprite", width=WIDTH, height=HEIGHT)
+setup_renderer_2d(app)
+
+# ---------------------------------------------------------------------------
+# Spawn entities
+# ---------------------------------------------------------------------------
+
+# texture_id=0 is the engine's built-in white pixel.
+# Setting r=0.40, g=0.65, b=1.0 tints it blue.
+app.world.spawn(
+    keel.Transform2D(x=SCREEN_CX, y=SCREEN_CY),
+    keel.Sprite(texture_id=0, width=64.0, height=64.0, r=0.40, g=0.65, b=1.0),
+    Hero(),
+)
+
+# ---------------------------------------------------------------------------
+# Systems
+# ---------------------------------------------------------------------------
+
+@app.system(keel.Phase.UPDATE)
+def move_hero(world, dt):
+    if app.input.is_key_down(keel.KEY_ESCAPE):
+        app.window.close()
+
+    right = app.input.is_key_down(keel.KEY_D) or app.input.is_key_down(keel.KEY_RIGHT)
+    left  = app.input.is_key_down(keel.KEY_A) or app.input.is_key_down(keel.KEY_LEFT)
+    up    = app.input.is_key_down(keel.KEY_W) or app.input.is_key_down(keel.KEY_UP)
+    down  = app.input.is_key_down(keel.KEY_S) or app.input.is_key_down(keel.KEY_DOWN)
+
+    dx = (1.0 if right else 0.0) - (1.0 if left else 0.0)
+    dy = (1.0 if up    else 0.0) - (1.0 if down else 0.0)
+
+    # world.query returns column views — writes go straight into ECS storage.
+    for transforms, heroes in world.query(keel.Transform2D, Hero):
+        for i in range(len(transforms)):
+            transforms["x"][i] += dx * heroes["speed"][i] * dt
+            transforms["y"][i] += dy * heroes["speed"][i] * dt
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+app.run()
+```
+
+<Steps>
+  <Step title="Create the app and call setup_renderer_2d">
+    `setup_renderer_2d(app)` wires the instanced sprite shader, allocates the texture atlas, and registers the `Phase.RENDER` system. Call it once before spawning any sprites.
+  </Step>
+  <Step title="Spawn Transform2D + Sprite entities">
+    Every entity that should appear on screen needs both components. The batcher queries for `(Transform2D, Sprite)` pairs automatically — no explicit registration required.
+  </Step>
+  <Step title="Load textures into the atlas (optional)">
+    Skip this step if `texture_id=0` is sufficient. For real art, call `renderer.atlas.load("path/to/image.png")` and store the returned integer.
+  </Step>
+  <Step title="Mutate Transform2D in systems">
+    Write to `transforms["x"][i]` and `transforms["y"][i]` inside any system to move sprites. The renderer reads the updated columns at the next `Phase.RENDER` tick.
+  </Step>
+</Steps>
+
+## Rendering Order
+
+Sprites are drawn in the order they appear when concatenating all matching archetypes. There is no explicit z-ordering within a texture group. To control draw order, spawn entities in the order you want them rendered (back to front), or use a camera with a known projection to place sprites at different world depths — the 2D renderer does not use depth testing.

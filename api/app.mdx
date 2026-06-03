@@ -1,0 +1,297 @@
+---
+title: "App — Keel's Top-Level Entry Point"
+sidebarTitle: "App"
+description: "App owns the World, Scheduler, Window, and InputState. Call App(title, width, height, vsync) to create a game window, register systems, and call app.run() to start the loop."
+---
+
+`App` is the single object you construct at the top of every Keel game. It initialises a GLFW window, creates a `World`, wires all input callbacks, and owns the `Scheduler` that drives the game loop. Call `app.run()` to block until the window closes; everything else — registering systems, inserting resources, loading assets — happens before that call.
+
+```python
+import keel
+
+app = keel.App(title="My Game", width=1280, height=720, vsync=True)
+
+@app.system(keel.Phase.UPDATE)
+def move(world, dt):
+    for (pos,) in world.query(Position):
+        pos["x"] += 100.0 * dt
+
+app.run()
+```
+
+---
+
+## Constructor
+
+```python
+keel.App(title="Keel", width=800, height=600, vsync=True)
+```
+
+<ParamField path="title" type="str" default="Keel">
+  Text shown in the OS window title bar.
+</ParamField>
+
+<ParamField path="width" type="int" default="800">
+  Initial framebuffer width in pixels.
+</ParamField>
+
+<ParamField path="height" type="int" default="600">
+  Initial framebuffer height in pixels.
+</ParamField>
+
+<ParamField path="vsync" type="bool" default="True">
+  Enable GLFW swap-interval V-Sync. When `False`, the loop inserts a manual sleep to target `FIXED_DT` frame time instead of relying on the display sync.
+</ParamField>
+
+The constructor performs the following work automatically:
+
+<Steps>
+  <Step title="Create World">
+    Instantiates `World()` and stores it as `app.world`.
+  </Step>
+  <Step title="Open Window">
+    Creates a GLFW window with the given dimensions and title, available as `app.window`.
+  </Step>
+  <Step title="Create InputState">
+    Instantiates `InputState()` and registers it as a world resource so systems can receive it via dependency injection.
+  </Step>
+  <Step title="Wire Callbacks">
+    Registers GLFW key, mouse, scroll, and framebuffer-resize callbacks that forward events into the world's event bus and the `InputState`.
+  </Step>
+</Steps>
+
+---
+
+## Properties
+
+### `App.world`
+
+```python
+app.world  # -> keel.World
+```
+
+The ECS `World` instance. Spawn entities, register components, query, and emit events through this object. Systems registered with `@app.system` receive this as their first argument.
+
+---
+
+### `App.input`
+
+```python
+app.input  # -> keel.InputState
+```
+
+The `InputState` polling object. Use it outside of a system for one-off checks, or receive it via resource injection inside a system. The same object is registered as a world resource under the `InputState` type.
+
+```python
+# Resource injection — preferred inside systems
+@app.system(keel.Phase.UPDATE)
+def handle_input(world, dt, inp: keel.InputState):
+    if inp.is_key_pressed(keel.KEY_SPACE):
+        world.emit(JumpEvent())
+```
+
+---
+
+### `App.ctx`
+
+```python
+app.ctx  # -> moderngl.Context
+```
+
+The `moderngl.Context` created by the window. Pass this to renderer setup calls that need a GL context reference. The property delegates to `app.window.ctx`.
+
+---
+
+### `App.scheduler`
+
+```python
+app.scheduler  # -> keel.Scheduler
+```
+
+The `Scheduler` that the run loop drives. `App` and `World` share the same scheduler instance — `@app.system(...)` and `@world.system(...)` both register into it, so there is no duplication or ordering mismatch.
+
+---
+
+## Methods
+
+### `App.system(phase, after=None)`
+
+Decorator factory that registers a function as a system in the given `Phase`.
+
+<ParamField path="phase" type="keel.Phase" required>
+  The execution phase. One of `Phase.PRE_UPDATE`, `UPDATE`, `POST_UPDATE`, `PRE_RENDER`, `RENDER`, `POST_RENDER`.
+</ParamField>
+
+<ParamField path="after" type="Callable | list[Callable] | None" default="None">
+  A system function (or list of functions) that must run before this one within the same phase. Raises `ValueError` if any listed function is in a different phase or does not exist.
+</ParamField>
+
+```python
+@app.system(keel.Phase.UPDATE)
+def physics_step(world, dt):
+    ...
+
+@app.system(keel.Phase.UPDATE, after=physics_step)
+def apply_velocity(world, dt):
+    # Guaranteed to run after physics_step in the same tick
+    ...
+```
+
+Systems may declare additional typed parameters beyond `world` and `dt`. The scheduler resolves them from the world's resource map by type annotation:
+
+```python
+@app.system(keel.Phase.RENDER)
+def draw(world, dt, renderer: keel.Renderer2DSetup):
+    renderer.draw_sprites(world)
+```
+
+---
+
+### `App.insert_resource(resource, type_=None)`
+
+Register a singleton resource that systems can receive via dependency injection.
+
+<ParamField path="resource" type="Any" required>
+  Any Python object to store as a singleton.
+</ParamField>
+
+<ParamField path="type_" type="type | None" default="None">
+  Override the key type used for look-up. When omitted, `type(resource)` is used. Pass an explicit type when registering a subclass instance that should be retrieved by its base class.
+</ParamField>
+
+```python
+class GameConfig:
+    gravity: float = 9.81
+    max_enemies: int = 50
+
+app.insert_resource(GameConfig())
+
+@app.system(keel.Phase.UPDATE)
+def spawn_enemies(world, dt, cfg: GameConfig):
+    ...
+```
+
+---
+
+### `App.setup_assets(watch_dirs=None)`
+
+Create and return the `AssetRegistry`, registering default loaders and (optionally) a hot-reload file watcher.
+
+<ParamField path="watch_dirs" type="list[str] | None" default="None">
+  List of filesystem directories to watch for changes. When a file changes, the asset is reloaded automatically during `PRE_UPDATE`.
+</ParamField>
+
+<ResponseField name="returns" type="keel.AssetRegistry">
+  The configured asset registry, also registered as a world resource.
+</ResponseField>
+
+```python
+assets = app.setup_assets(watch_dirs=["assets/"])
+handle = assets.load("assets/player.png")
+```
+
+---
+
+### `App.add_shutdown_hook(hook)`
+
+Register a callable to invoke after the main loop exits and before GLFW is torn down.
+
+<ParamField path="hook" type="Callable[[], None]" required>
+  Zero-argument callable. Exceptions raised inside the hook are swallowed so that subsequent hooks and GLFW cleanup still run.
+</ParamField>
+
+```python
+audio = keel.setup_audio(app)
+
+app.add_shutdown_hook(audio.shutdown)
+```
+
+---
+
+### `App.run()`
+
+Block until the window closes, then invoke shutdown hooks, destroy the window, and terminate GLFW.
+
+<Warning>
+  `App.run()` is **single-shot**. Calling it a second time raises `RuntimeError` — the GLFW context and window are destroyed when the loop exits. Create a new `App` instance to open another window.
+</Warning>
+
+```python
+app.run()
+# Window is now closed; GLFW has been terminated.
+```
+
+The run loop internally uses `FixedStepDriver` to advance simulation phases at exactly `FIXED_DT` (1/60 s) and render phases once per visual frame. See [Phase](/api/phase) for the execution model.
+
+---
+
+## `keel.FIXED_DT`
+
+```python
+keel.FIXED_DT  # -> float  (1/60 ≈ 0.016667)
+```
+
+The fixed simulation timestep used by the run loop. Simulation phases (`PRE_UPDATE`, `UPDATE`, `POST_UPDATE`) always receive this exact value as `dt`. Render phases receive the real elapsed wall-clock time for the frame.
+
+```python
+SPEED = 200.0  # pixels per second
+
+@app.system(keel.Phase.UPDATE)
+def move(world, dt):
+    # dt == keel.FIXED_DT every call — deterministic physics
+    for (pos,) in world.query(Position):
+        pos["x"] += SPEED * dt
+```
+
+---
+
+## `keel.dev_tools(app)`
+
+```python
+tools = keel.dev_tools(app)  # -> DevTools
+```
+
+Convenience factory that creates (or returns the cached) `DevTools` bundle for `app`. Call after `app.setup_assets()` and physics setup so the inspector and debug-draw systems can see all registered resources.
+
+<ParamField path="app" type="App" required>
+  The `App` instance to attach developer tooling to.
+</ParamField>
+
+<ResponseField name="returns" type="DevTools">
+  The `DevTools` bundle with profiler, debug_draw, and inspector attached.
+</ResponseField>
+
+Calling `dev_tools` twice on the same `App` returns the cached instance — the systems are not registered twice.
+
+---
+
+## `DevTools`
+
+`DevTools` is a simple container created by `keel.dev_tools(app)`. It registers three debug subsystems as world resources and in the appropriate render phases.
+
+<CardGroup cols={3}>
+  <Card title="profiler" icon="chart-line">
+    A frame profiler that wraps every system call in `begin`/`end` timing markers. Access via `tools.profiler`.
+  </Card>
+  <Card title="debug_draw" icon="pen-ruler">
+    An overlay that draws physics collider outlines using GL lines. Only set when a `Physics2D` resource exists; otherwise `None`. Access via `tools.debug_draw`.
+  </Card>
+  <Card title="inspector" icon="magnifying-glass">
+    An ImGui-based entity inspector panel. Renders on top of the debug-draw overlay in `POST_RENDER`. Access via `tools.inspector`.
+  </Card>
+</CardGroup>
+
+```python
+import keel
+
+app = keel.App("Dev Build", 1280, 720)
+keel.setup_physics_2d(app)
+tools = keel.dev_tools(app)
+
+# tools.profiler, tools.debug_draw, tools.inspector are now active
+app.run()
+```
+
+<Note>
+  `debug_draw` is `None` when no `Physics2D` resource is found. Attach physics before calling `dev_tools` if you want collision shape overlays.
+</Note>

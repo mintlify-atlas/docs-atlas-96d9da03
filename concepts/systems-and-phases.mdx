@@ -1,0 +1,274 @@
+---
+title: "Systems, Phases, and Resource Injection"
+sidebarTitle: "Systems & Phases"
+description: "Keel systems are plain Python functions registered to a Phase. The Scheduler runs them in phase order each tick, injecting typed resources into extra parameters automatically."
+---
+
+Systems are where game logic lives in Keel. A system is a plain Python function with a fixed two-parameter prefix — `(world, dt)` — followed by any number of optional typed parameters that the scheduler resolves automatically from the world's resource registry. There is no base class to inherit, no interface to implement, and no decorator magic beyond the registration call itself.
+
+---
+
+## Defining a System
+
+The simplest system takes only the required prefix:
+
+```python
+def print_fps(world, dt):
+    if dt > 0:
+        print(f"FPS: {1.0 / dt:.0f}")
+```
+
+Systems that need additional context declare extra parameters with type annotations. The scheduler inspects those annotations at registration time and looks up matching resources when it invokes the function:
+
+```python
+from keel import InputState
+
+def handle_quit(world, dt, input: InputState):
+    if input.is_key_pressed(keel.KEY_ESCAPE):
+        world.emit(QuitEvent())
+```
+
+---
+
+## Registering Systems
+
+<CardGroup cols={2}>
+  <Card title="@app.system(phase)" icon="layer-group">
+    The most common path. Registers the decorated function into the shared `Scheduler`.
+    ```python
+    @app.system(keel.Phase.UPDATE)
+    def move(world, dt):
+        ...
+    ```
+  </Card>
+  <Card title="@world.system(phase)" icon="globe">
+    Equivalent to `@app.system`; they share the same `Scheduler` instance.
+    ```python
+    @world.system(keel.Phase.UPDATE)
+    def move(world, dt):
+        ...
+    ```
+  </Card>
+</CardGroup>
+
+Both decorators call `Scheduler.register(phase, fn, after=...)` under the hood and return the function unchanged, so the function remains callable outside the scheduler.
+
+---
+
+## The Six Phases
+
+Systems run in strict phase order every tick. The six phases, in execution order:
+
+| Phase | IntEnum value | Typical use |
+|---|---|---|
+| `Phase.PRE_UPDATE` | 0 | Input processing, timer updates, early-frame bookkeeping. |
+| `Phase.UPDATE` | 1 | Core game logic — movement, AI, state machines, scoring. |
+| `Phase.POST_UPDATE` | 2 | Physics bridges (`setup_physics_2d`, `setup_physics_3d`) and post-physics reactions. |
+| `Phase.PRE_RENDER` | 3 | Camera updates, culling, asset hot-reload drain. |
+| `Phase.RENDER` | 4 | Draw calls. Renderer systems registered by `setup_renderer_2d` run here. |
+| `Phase.POST_RENDER` | 5 | Debug overlays, ImGui submission, swap-buffer work. |
+
+```python
+@app.system(keel.Phase.PRE_UPDATE)
+def read_gamepad(world, dt):
+    # Runs before any UPDATE system sees input.
+    ...
+
+@app.system(keel.Phase.UPDATE)
+def move_player(world, dt):
+    # Core simulation.
+    ...
+
+@app.system(keel.Phase.POST_UPDATE)
+def despawn_dead(world, dt):
+    # Safe to call world.despawn() here — physics already stepped.
+    ...
+
+@app.system(keel.Phase.RENDER)
+def draw_hud(world, dt):
+    # Issue draw calls.
+    ...
+```
+
+---
+
+## Ordering Within a Phase
+
+Systems within the same phase run in topological order determined by `after` dependencies. Without `after`, systems run in registration order.
+
+```python
+@app.system(keel.Phase.UPDATE)
+def read_input(world, dt):
+    ...
+
+@app.system(keel.Phase.UPDATE)
+def apply_velocity(world, dt):
+    ...
+
+# apply_movement is guaranteed to run after both of the above.
+@app.system(keel.Phase.UPDATE, after=[read_input, apply_velocity])
+def apply_movement(world, dt):
+    ...
+```
+
+Rules enforced at registration time:
+
+- Every system listed in `after` must already be registered in the **same phase**. Referencing a system from a different phase raises `ValueError`.
+- Circular dependencies raise `ValueError` and roll back the offending registration, leaving the scheduler in a consistent state.
+
+---
+
+## Resource Injection
+
+Any parameter beyond `world` and `dt` must carry a type annotation. The scheduler resolves the annotation against the world's resource registry (`world._resources`) and passes the result as a positional argument.
+
+```python
+from keel import InputState
+
+class AudioSystem:
+    def play(self, path: str) -> None: ...
+
+@app.system(keel.Phase.UPDATE)
+def jump(world, dt, input: InputState, audio: AudioSystem):
+    if input.is_key_pressed(keel.KEY_SPACE):
+        audio.play("assets/jump.wav")
+```
+
+Register resources with `app.insert_resource` or `world.insert_resource` before the loop starts:
+
+```python
+app.insert_resource(AudioSystem())
+```
+
+<Warning>
+Every annotated extra parameter **must** have its resource registered before the system runs. If `world.get_resource(type_)` returns `None`, the system receives `None` for that argument. Keel does not raise an error — make sure you register resources during setup.
+</Warning>
+
+Parameters annotated with a type that cannot be resolved to a `type` object (generic aliases, union types, etc.) cause `TypeError` at registration time, not at runtime. Define resource types at module level so `typing.get_type_hints` can resolve them.
+
+---
+
+## Scheduler API Reference
+
+The `Scheduler` is accessible as `app.scheduler` or `world.scheduler`. You rarely need to call it directly, but the full surface is:
+
+```python
+# Register a function manually (same as @app.system).
+app.scheduler.register(keel.Phase.UPDATE, my_fn, after=other_fn)
+
+# Inspect registered systems for a phase.
+fns = app.scheduler.systems(keel.Phase.UPDATE)  # list[Callable]
+
+# Remove all registered systems from every phase.
+app.scheduler.clear()
+```
+
+### Selective Tick Methods
+
+The main loop calls these two methods instead of running all phases at once, which lets simulation and rendering run at different rates:
+
+```python
+# Run only PRE_UPDATE, UPDATE, POST_UPDATE.
+app.scheduler.tick_simulation(world, FIXED_DT)
+
+# Run only PRE_RENDER, RENDER, POST_RENDER.
+app.scheduler.tick_render(world, elapsed)
+```
+
+These are useful when writing headless tests or a custom loop — see `world.tick` below.
+
+---
+
+## Testing Systems with `world.tick`
+
+`world.tick(dt)` runs a complete single-frame cycle without a window:
+
+1. Clears all event queues.
+2. Runs every system across all six phases in order.
+3. Calls `world.flush()` to apply deferred structural changes.
+
+```python
+import keel
+
+world = keel.World()
+
+@keel.component
+class Counter:
+    value: int = 0
+
+world.spawn(Counter(value=0))
+world.flush()
+
+@world.system(keel.Phase.UPDATE)
+def increment(world, dt):
+    for counter, in world.query(Counter):
+        counter['value'] += 1
+
+world.tick(1.0 / 60.0)
+world.tick(1.0 / 60.0)
+
+gs = world.query_one(Counter)
+assert gs['value'] == 2
+```
+
+<Tip>
+Use `world.tick` in unit tests to exercise systems without spinning up a window or GLFW. It is the same codepath the main loop uses, so your systems behave identically in tests and in production.
+</Tip>
+
+---
+
+## A Complete Example
+
+The snippet below shows all three concepts together: phase ordering, `after` dependencies, and resource injection.
+
+```python
+import keel
+from keel import InputState
+
+app = keel.App(title="Systems Demo", width=800, height=600)
+
+@keel.component
+class Player:
+    speed: float = 200.0
+
+@keel.component
+class Dash:
+    cooldown: float = 0.0
+    duration: float = 0.0
+
+app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    Player(),
+    Dash(),
+)
+
+# PRE_UPDATE: consume raw input into intent markers.
+@app.system(keel.Phase.PRE_UPDATE)
+def read_dash_input(world, dt, input: InputState):
+    for dash, in world.query(Dash):
+        if dash['cooldown'][0] <= 0 and input.is_key_pressed(keel.KEY_LEFT_SHIFT):
+            dash['duration'][:] = 0.2   # 0.2 s dash window
+            dash['cooldown'][:] = 1.0   # 1 s cooldown
+
+# UPDATE: apply movement, depends on PRE_UPDATE data being ready.
+@app.system(keel.Phase.UPDATE)
+def move_player(world, dt, input: InputState):
+    for transform, player, dash in world.query(
+        keel.Transform2D, Player, Dash
+    ):
+        speed_mult = 3.0 if dash['duration'][0] > 0 else 1.0
+        spd = player['speed'][0] * speed_mult
+        if input.is_key_down(keel.KEY_D):
+            transform['x'] += spd * dt
+        if input.is_key_down(keel.KEY_A):
+            transform['x'] -= spd * dt
+
+# POST_UPDATE: tick down timers after movement.
+@app.system(keel.Phase.POST_UPDATE)
+def tick_dash(world, dt):
+    for dash, in world.query(Dash):
+        dash['duration'] = (dash['duration'] - dt).clip(0)
+        dash['cooldown'] = (dash['cooldown'] - dt).clip(0)
+
+app.run()
+```

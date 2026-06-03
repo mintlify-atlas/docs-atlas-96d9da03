@@ -1,0 +1,195 @@
+---
+title: "Hot Reload: Instant Feedback on File Save"
+sidebarTitle: "Hot Reload"
+description: "Keel's hot reload has two layers: keel run restarts the Python process on .py changes, and the asset watcher re-uploads textures and JSON data on the main thread without restarting."
+---
+
+Keel provides two distinct hot-reload layers that work at different scopes and speeds. The first layer — process hot reload — is driven by the `keel run` CLI command and restarts the entire Python process when a `.py` file changes. The second layer — asset hot reload — is built into the `setup_assets` function and re-uploads changed textures and JSON files on the main thread while the game continues running. Understanding which layer handles which kind of change helps you structure a fast iteration loop.
+
+---
+
+## Process hot reload (`keel run`)
+
+Process hot reload restarts your game from scratch whenever any `.py` file in the project directory changes. It is the right tool for iterating on game logic, systems, components, and anything else that lives in Python code.
+
+### How it works
+
+`keel run` (or `keel run <entry>`) starts your entry script as a subprocess and sets up a `watchdog` file-system observer on the project directory. The observer runs on its own thread and enqueues events into a `queue.Queue`. The main `keel run` thread drains that queue in a polling loop.
+
+```
+save mygame/systems.py
+  │
+  ▼
+watchdog on_modified event
+  │   (background thread → queue.Queue)
+  ▼
+debounce 50 ms (coalesce burst saves)
+  │
+  ▼
+terminate old subprocess (SIGTERM → 3s wait → SIGKILL)
+  │
+  ▼
+spawn fresh subprocess: python main.py
+```
+
+### What is monitored
+
+The observer watches recursively from the project root (`.` by default). Any `.py` file at any depth triggers a reload:
+
+```
+mygame/
+├── main.py          ← watched
+├── systems/
+│   ├── physics.py   ← watched
+│   └── render.py    ← watched
+└── assets/
+    └── player.png   ← NOT watched by keel run
+```
+
+Non-`.py` files — textures, JSON data, audio — are ignored by the process watcher. Those are handled by the asset watcher described below.
+
+### Debouncing
+
+After the first `.py` change event arrives, `keel run` sleeps for **50 milliseconds** before acting. During that window it drains any additional events that arrived (e.g. an editor saving multiple files at once, an auto-formatter rewriting imports). All of those saves are coalesced into a single restart.
+
+### No state preservation
+
+Process hot reload is a full restart. The new subprocess starts from `app = keel.App(...)` — no ECS world, no component data, no resources carry over from the previous run. This is by design: Python has no reliable way to patch running module state in-place for arbitrary code changes. If you need to persist iteration state (a camera position, a score counter) across reloads, write it to a file in your `pre-shutdown` path and read it back on startup.
+
+<Warning>
+  Do not rely on module-level globals surviving a reload. Each subprocess is a clean Python interpreter. Data written to disk (JSON scene files in `scenes/`, config files) is the only safe persistence boundary between restarts.
+</Warning>
+
+### Subprocess lifecycle
+
+```
+keel run starts
+  └─ spawns: python main.py  ──────────────────┐
+                                                │  running
+  .py file saved                                │
+  └─ terminate (SIGTERM → 3s → SIGKILL)        │
+  └─ spawns: python main.py  ──────────────────┘  (fresh)
+
+Ctrl+C pressed
+  └─ [keel] shutting down
+  └─ terminate final subprocess
+  └─ observer.stop() + observer.join(timeout=2s)
+  └─ exit
+```
+
+---
+
+## Asset hot reload (`setup_assets`)
+
+Asset hot reload updates textures and JSON data files while the game is running — no process restart required. It is built into `setup_assets` and is active whenever you pass a `watch_dirs` argument.
+
+### Setup
+
+```python
+import keel
+from keel.assets import setup_assets
+
+app = keel.App(title="My Game", width=800, height=600)
+
+# Watch the assets/ directory for changes.
+assets = setup_assets(app, watch_dirs=["assets/"])
+```
+
+Passing `watch_dirs` starts a `watchdog` observer on each listed directory. You can list multiple directories:
+
+```python
+assets = setup_assets(app, watch_dirs=["assets/", "data/levels/"])
+```
+
+### How asset reload works
+
+The asset watcher runs on a `watchdog` background thread, but all GL re-uploads happen on the main thread. This is required: OpenGL contexts have thread affinity, and writing a new texture from a background thread produces undefined behavior or a crash.
+
+```
+assets/player.png saved on disk
+  │
+  ▼
+watchdog background thread detects change
+  └─ enqueues file path into an internal queue
+  
+  (no GL work here — wrong thread)
+
+next PRE_UPDATE tick (main thread)
+  └─ drains the queue
+  └─ calls the registered loader for .png → Pillow decode → GL texture upload
+  └─ updates the AssetRegistry entry in place
+  └─ all Sprite components using that texture_id now render the new image
+```
+
+The queue-drain happens inside a `PRE_UPDATE` system registered by `setup_assets`. It runs once per simulation tick before any gameplay systems, so assets are fresh by the time your `UPDATE` systems execute.
+
+### Supported formats
+
+| Extension | Reload behavior |
+|---|---|
+| `.png` | Decoded with Pillow, re-uploaded as a GL texture |
+| `.jpg` / `.jpeg` | Decoded with Pillow, re-uploaded as a GL texture |
+| `.bmp` | Decoded with Pillow, re-uploaded as a GL texture |
+| `.tga` | Decoded with Pillow, re-uploaded as a GL texture |
+| `.json` | Re-parsed, new value stored in the registry |
+
+### What is not hot-reloaded
+
+| File type | How to update |
+|---|---|
+| `.py` source files | Use `keel run` (process restart) |
+| Audio files (`.ogg`, `.wav`) | Restart the process — the audio engine caches decoded data |
+| Font files | Restart the process — glyph atlases are baked at load time |
+
+---
+
+## Choosing the right layer
+
+<CardGroup cols={2}>
+  <Card title="Code change" icon="code">
+    **Use `keel run`.**  
+    Saves a `.py` file → process restarts within ~50 ms. Use this for systems, components, game logic, renderer setup, and anything that lives in Python source.
+  </Card>
+  <Card title="Asset change" icon="image">
+    **Asset watcher handles it automatically.**  
+    Save a texture or JSON file inside a watched directory → it is re-uploaded in the next `PRE_UPDATE` tick, no restart needed. The game keeps running.
+  </Card>
+</CardGroup>
+
+### Combined workflow
+
+The two layers compose naturally. Run `keel run` for the outer dev loop and let `setup_assets` handle asset churn inside the running process:
+
+```bash
+keel new mygame
+cd mygame
+keel run
+```
+
+```python
+# main.py — both hot reload layers active.
+import keel
+from keel.assets import setup_assets
+from keel.renderer import setup_renderer_2d
+
+app = keel.App(title="mygame", width=800, height=600)
+
+# Asset watcher: re-uploads images and JSON without restarting.
+assets = setup_assets(app, watch_dirs=["assets/"])
+
+setup_renderer_2d(app)
+
+@app.system(keel.Phase.UPDATE)
+def update(world, dt):
+    pass
+
+app.run()
+```
+
+With this setup:
+- Edit `main.py` or any `.py` → `keel run` restarts the process (≈50 ms).
+- Edit `assets/player.png` → the asset watcher re-uploads the texture in the next sim tick. The window never closes.
+
+<Tip>
+  During a content-heavy phase (tweaking sprite sizes, adjusting tile maps, editing JSON level data), keep `keel run` running and make changes only to files in `assets/`. You will get sub-tick reload latency — often faster than the time it takes to glance at the screen.
+</Tip>

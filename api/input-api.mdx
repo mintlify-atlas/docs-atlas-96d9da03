@@ -1,0 +1,307 @@
+---
+title: "Input Module: InputState, Gamepad, and Key Constants"
+sidebarTitle: "Input API"
+description: "InputState provides held-state and edge-detected keyboard and mouse polling. GamepadState polls up to 4 gamepads. Key and button constants are re-exported from GLFW."
+---
+
+Keel exposes two complementary input surfaces: a stateful polling API (`InputState`, `GamepadState`) and an event-bus API (`KeyEvent`, `MouseButtonEvent`, etc.). The polling API is best for continuous input like movement; the event bus is best for one-shot actions like jump or shoot. Both update on the same GLFW callbacks wired by `App.__init__`.
+
+---
+
+## `InputState`
+
+`InputState` is a stateful snapshot of currently-pressed keys and mouse buttons, plus current cursor position. It is inserted as a world resource by `App.__init__` and updated via GLFW callbacks on every frame boundary. Inject it into any system by type:
+
+```python
+@app.system(keel.Phase.UPDATE)
+def player_move(world, dt, input: keel.InputState):
+    speed = 200.0
+    for (transforms,) in world.query(keel.Transform2D):
+        if input.is_key_down(keel.KEY_RIGHT):
+            transforms["x"] += speed * dt
+        if input.is_key_down(keel.KEY_LEFT):
+            transforms["x"] -= speed * dt
+```
+
+### Methods
+
+<ParamField path="is_key_down(key: int) -> bool" type="method">
+  Returns `True` if `key` is currently held. Suitable for continuous actions (movement, accelerating, charging). Use a GLFW key constant (e.g. `keel.KEY_W`) as the argument.
+
+  ```python
+  if input.is_key_down(keel.KEY_SPACE):
+      player_fly()
+  ```
+</ParamField>
+
+<ParamField path="is_key_pressed(key: int) -> bool" type="method">
+  **Rising edge** — returns `True` only on the frame the key transitions from up to down. Suitable for one-shot actions (jump, shoot, toggle). `begin_frame()` computes this by diffing against the previous frame's snapshot.
+
+  ```python
+  if input.is_key_pressed(keel.KEY_SPACE):
+      phys.apply_impulse(player, 0.0, 500.0)  # jump once
+  ```
+</ParamField>
+
+<ParamField path="is_key_released(key: int) -> bool" type="method">
+  **Falling edge** — returns `True` only on the frame the key transitions from down to up. Useful for releasing a charged ability.
+</ParamField>
+
+<ParamField path="is_mouse_button_down(button: int) -> bool" type="method">
+  Returns `True` if `button` is currently held. Use `keel.MOUSE_BUTTON_LEFT`, `keel.MOUSE_BUTTON_RIGHT`, or `keel.MOUSE_BUTTON_MIDDLE`.
+
+  ```python
+  if input.is_mouse_button_down(keel.MOUSE_BUTTON_LEFT):
+      shoot()
+  ```
+</ParamField>
+
+<ParamField path="is_mouse_button_pressed(button: int) -> bool" type="method">
+  Rising edge for mouse buttons — `True` only on the frame the button first goes down.
+</ParamField>
+
+<ParamField path="is_mouse_button_released(button: int) -> bool" type="method">
+  Falling edge for mouse buttons — `True` only on the frame the button is released.
+</ParamField>
+
+<ParamField path="mouse_position() -> tuple[float, float]" type="method">
+  Returns the most recent cursor position as `(x, y)` in window coordinates (pixels, top-left origin, Y grows downward). Updated every time the cursor moves.
+
+  ```python
+  mx, my = input.mouse_position()
+  ```
+</ParamField>
+
+<ParamField path="consume_scroll() -> tuple[float, float]" type="method">
+  Return the accumulated `(x_offset, y_offset)` scroll wheel deltas since the last call and reset the accumulators to zero. Call once per frame from the system that handles scrolling.
+
+  ```python
+  sx, sy = input.consume_scroll()
+  camera_zoom += sy * 0.1
+  ```
+</ParamField>
+
+---
+
+## Gamepad
+
+### `setup_gamepad`
+
+```python
+def setup_gamepad(app: Any) -> GamepadState
+```
+
+Insert `GamepadState` as a world resource and wire a `Phase.PRE_UPDATE` poll system that calls `state.poll(world)` each frame. `poll` reads GLFW's mapped gamepad state for slots 0–3 and emits `GamepadButtonEvent` and `GamepadAxisEvent` into the world for any transitions detected. Idempotent.
+
+```python
+import keel
+
+app = keel.App()
+gamepad = keel.setup_gamepad(app)
+```
+
+---
+
+### `GamepadState`
+
+`GamepadState` is a polled snapshot of every connected gamepad in slots 0–3. It is also a world resource, so inject it into systems:
+
+```python
+@app.system(keel.Phase.UPDATE)
+def gamepad_move(world, dt, gp: keel.GamepadState):
+    if not gp.is_connected(0):
+        return
+    lx = gp.get_axis(0, keel.GAMEPAD_AXIS_LEFT_X)
+    ly = gp.get_axis(0, keel.GAMEPAD_AXIS_LEFT_Y)
+    # move player by lx, ly
+```
+
+#### Methods
+
+<ParamField path="is_connected(gamepad_id: int) -> bool" type="method">
+  Returns `True` iff `gamepad_id` (0–3) reported a mapped gamepad on the last poll. Returns `False` for out-of-range IDs.
+
+  ```python
+  if gp.is_connected(0):
+      handle_controller_input()
+  ```
+</ParamField>
+
+<ParamField path="is_button_down(gamepad_id: int, button: int) -> bool" type="method">
+  Returns `True` iff `button` is currently held on `gamepad_id`. Use `keel.GAMEPAD_BUTTON_*` constants. Returns `False` for disconnected or out-of-range IDs/buttons.
+
+  ```python
+  if gp.is_button_down(0, keel.GAMEPAD_BUTTON_A):
+      player_jump()
+  ```
+</ParamField>
+
+<ParamField path="get_axis(gamepad_id: int, axis: int) -> float" type="method">
+  Raw axis value in `[−1.0, 1.0]`. Returns `0.0` for disconnected gamepads or out-of-range IDs/axes. Use `keel.GAMEPAD_AXIS_*` constants.
+
+  ```python
+  lx = gp.get_axis(0, keel.GAMEPAD_AXIS_LEFT_X)
+  ly = gp.get_axis(0, keel.GAMEPAD_AXIS_LEFT_Y)
+  ```
+
+  <Note>
+    `get_axis` always returns the raw value; no deadzone is applied. Apply your own deadzone if needed (e.g. `if abs(lx) > 0.1: ...`). `GamepadAxisEvent` is only emitted when an axis changes by more than 0.05 from its last emitted value.
+  </Note>
+</ParamField>
+
+---
+
+## Key constants
+
+All GLFW `KEY_*` constants are re-exported under the `keel` namespace at import time. Use them wherever a key integer is expected.
+
+### Common keys
+
+| Constant | Description |
+|---|---|
+| `keel.KEY_W` | W key |
+| `keel.KEY_A` | A key |
+| `keel.KEY_S` | S key |
+| `keel.KEY_D` | D key |
+| `keel.KEY_SPACE` | Space bar |
+| `keel.KEY_ESCAPE` | Escape |
+| `keel.KEY_ENTER` | Enter / Return |
+| `keel.KEY_LEFT_SHIFT` | Left Shift |
+| `keel.KEY_LEFT_CONTROL` | Left Ctrl |
+| `keel.KEY_LEFT_ALT` | Left Alt |
+
+### Arrow keys
+
+| Constant | Description |
+|---|---|
+| `keel.KEY_UP` | Up arrow |
+| `keel.KEY_DOWN` | Down arrow |
+| `keel.KEY_LEFT` | Left arrow |
+| `keel.KEY_RIGHT` | Right arrow |
+
+All other `glfw.KEY_*` constants are also available (e.g. `keel.KEY_F1` through `keel.KEY_F12`, `keel.KEY_TAB`, `keel.KEY_BACKSPACE`, digit keys `keel.KEY_0`–`keel.KEY_9`, etc.).
+
+### Action constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `keel.PRESS` | `glfw.PRESS` | Key or button was pressed |
+| `keel.RELEASE` | `glfw.RELEASE` | Key or button was released |
+| `keel.REPEAT` | `glfw.REPEAT` | Key held long enough to repeat (keyboard auto-repeat) |
+
+---
+
+## Mouse button constants
+
+| Constant | Description |
+|---|---|
+| `keel.MOUSE_BUTTON_LEFT` | Primary / left mouse button |
+| `keel.MOUSE_BUTTON_RIGHT` | Secondary / right mouse button |
+| `keel.MOUSE_BUTTON_MIDDLE` | Middle mouse button / scroll wheel click |
+| `keel.MOUSE_BUTTON_4` – `keel.MOUSE_BUTTON_8` | Extra buttons (side buttons, etc.) |
+
+---
+
+## Gamepad button constants
+
+| Constant | Typical Xbox mapping |
+|---|---|
+| `keel.GAMEPAD_BUTTON_A` | A (bottom face) |
+| `keel.GAMEPAD_BUTTON_B` | B (right face) |
+| `keel.GAMEPAD_BUTTON_X` | X (left face) |
+| `keel.GAMEPAD_BUTTON_Y` | Y (top face) |
+| `keel.GAMEPAD_BUTTON_LEFT_BUMPER` | LB |
+| `keel.GAMEPAD_BUTTON_RIGHT_BUMPER` | RB |
+| `keel.GAMEPAD_BUTTON_BACK` | Back / Select |
+| `keel.GAMEPAD_BUTTON_START` | Start / Menu |
+| `keel.GAMEPAD_BUTTON_GUIDE` | Xbox / Guide button |
+| `keel.GAMEPAD_BUTTON_LEFT_THUMB` | Left stick click (L3) |
+| `keel.GAMEPAD_BUTTON_RIGHT_THUMB` | Right stick click (R3) |
+| `keel.GAMEPAD_BUTTON_DPAD_UP` | D-pad Up |
+| `keel.GAMEPAD_BUTTON_DPAD_RIGHT` | D-pad Right |
+| `keel.GAMEPAD_BUTTON_DPAD_DOWN` | D-pad Down |
+| `keel.GAMEPAD_BUTTON_DPAD_LEFT` | D-pad Left |
+
+GLFW uses a standard "SDL-style" button layout (gamepad database). GLFW_GAMEPAD_BUTTON_* integers match the constants above.
+
+---
+
+## Gamepad axis constants
+
+| Constant | Range | Typical mapping |
+|---|---|---|
+| `keel.GAMEPAD_AXIS_LEFT_X` | `[−1, 1]` | Left stick horizontal |
+| `keel.GAMEPAD_AXIS_LEFT_Y` | `[−1, 1]` | Left stick vertical (up = −1) |
+| `keel.GAMEPAD_AXIS_RIGHT_X` | `[−1, 1]` | Right stick horizontal |
+| `keel.GAMEPAD_AXIS_RIGHT_Y` | `[−1, 1]` | Right stick vertical (up = −1) |
+| `keel.GAMEPAD_AXIS_LEFT_TRIGGER` | `[−1, 1]` | Left trigger (unpressed = −1, fully pressed = 1) |
+| `keel.GAMEPAD_AXIS_RIGHT_TRIGGER` | `[−1, 1]` | Right trigger (unpressed = −1, fully pressed = 1) |
+
+---
+
+## Input events (event bus)
+
+In addition to polling, all input transitions are emitted as events into the world's event bus. Subscribe to them with `world.read_events(EventType)` in any system:
+
+```python
+@app.system(keel.Phase.UPDATE)
+def on_key_press(world, dt):
+    for event in world.read_events(keel.KeyEvent):
+        if event.key == keel.KEY_ESCAPE and event.action == keel.PRESS:
+            raise SystemExit
+
+@app.system(keel.Phase.UPDATE)
+def on_click(world, dt):
+    for event in world.read_events(keel.MouseButtonEvent):
+        if event.button == keel.MOUSE_BUTTON_LEFT and event.action == keel.PRESS:
+            fire_projectile()
+
+@app.system(keel.Phase.UPDATE)
+def on_controller(world, dt):
+    for event in world.read_events(keel.GamepadButtonEvent):
+        if event.button == keel.GAMEPAD_BUTTON_A and event.action == keel.PRESS:
+            player_jump()
+    for event in world.read_events(keel.GamepadAxisEvent):
+        print(f"Gamepad {event.gamepad_id} axis {event.axis} = {event.value:.2f}")
+```
+
+### Event types
+
+| Type | Fields | Notes |
+|---|---|---|
+| `KeyEvent` | `key`, `scancode`, `action`, `mods` | Emitted on PRESS and REPEAT, not RELEASE |
+| `MouseButtonEvent` | `button`, `action`, `mods` | Emitted on every PRESS and RELEASE |
+| `MouseMoveEvent` | `x`, `y` | Emitted whenever the cursor moves |
+| `MouseScrollEvent` | `x_offset`, `y_offset` | Emitted on scroll wheel motion |
+| `WindowResizeEvent` | `width`, `height` | Framebuffer dimensions in pixels |
+| `GamepadButtonEvent` | `gamepad_id`, `button`, `action` | Emitted on every button state transition |
+| `GamepadAxisEvent` | `gamepad_id`, `axis`, `value` | Emitted when axis changes by > 0.05 from last emitted value |
+
+---
+
+## Low-level: `wire_callbacks`
+
+```python
+def wire_callbacks(
+    glfw_window: Any,
+    world: Any,
+    input_state: InputState,
+    window_obj: Any | None = None,
+) -> dict[str, Callable]
+```
+
+Wire every GLFW input/resize callback for `glfw_window`. Returns the kept-alive callback dict (`{"key": ..., "mouse_button": ..., "cursor_pos": ..., "scroll": ..., "framebuffer_size": ...}`). Called automatically by `App.__init__`; only needed for custom window setups outside `App`.
+
+```python
+callbacks = keel.wire_callbacks(
+    glfw_window=my_glfw_window,
+    world=app.world,
+    input_state=app.input,
+    window_obj=my_window_obj,
+)
+# Keep `callbacks` alive — do NOT let it be garbage collected
+```
+
+<Warning>
+  The returned dict must be kept alive for the lifetime of the GLFW window. GLFW holds only a weak reference to callbacks; if the dict is garbage collected, the callbacks stop firing.
+</Warning>

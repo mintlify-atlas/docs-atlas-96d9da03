@@ -1,0 +1,261 @@
+---
+title: "Physics Body Types: Dynamic, Static, and Kinematic"
+sidebarTitle: "Body Types"
+description: "Keel physics uses three body types: DYNAMIC for colliding entities, STATIC for immovable geometry, and KINEMATIC for manually-moved entities. Choosing wrong is the top Keel bug."
+---
+
+Every physics entity in Keel has a `body_type` that governs how the physics bridge treats it each frame. Choosing the wrong body type is the single most common Keel bug — it produces a collision that physically occurs but emits no `CollisionEvent2D` or `CollisionEvent3D`, leaving the gameplay system deaf to an impact it expected to see. Reading this page first saves hours of debugging later.
+
+## The BodyType enum
+
+`keel.BodyType` is an `IntEnum` shared by both the 2D (pymunk) and 3D (pybullet) bridges:
+
+```python
+from enum import IntEnum
+
+class BodyType(IntEnum):
+    DYNAMIC   = 0   # affected by forces; collides with everything
+    STATIC    = 1   # immovable; never moved by physics
+    KINEMATIC = 2   # moved manually; pushes dynamics but emits no K/K or K/S events
+```
+
+Because it is an `IntEnum`, the named form and the raw integer are always interchangeable:
+
+```python
+keel.BodyType.STATIC == 1   # True
+int(keel.BodyType.DYNAMIC)  # 0
+```
+
+Prefer the enum form in new code for readability. Raw ints continue to work for backwards compatibility.
+
+## DYNAMIC
+
+A DYNAMIC body is fully simulated: gravity pulls it down, collisions deflect it, and impulses and forces change its velocity. It is the most powerful body type and the only one guaranteed to emit collision events against any other body it touches.
+
+```python
+keel.RigidBody2D(mass=1.0, body_type=keel.BodyType.DYNAMIC)
+```
+
+**Use DYNAMIC for:** bullets, balls, enemies, particles, crates, anything that needs to register hits and respond to physics.
+
+<Tip>
+  When in doubt, use DYNAMIC. You can always constrain its movement in a system by reading velocity from the ECS and clamping it, or by applying counter-forces. DYNAMIC is the body type that "just works" with collision events.
+</Tip>
+
+## STATIC
+
+A STATIC body never moves. The physics engine ignores forces and impulses on it entirely — the bridge writes its initial position once and then skips it on every `sync_from_physics` pass. STATIC bodies do generate `CollisionEvent2D` / `CollisionEvent3D` when a DYNAMIC body touches them.
+
+```python
+keel.RigidBody2D(body_type=keel.BodyType.STATIC)
+```
+
+**Use STATIC for:** walls, floors, fixed platforms, level boundaries, any geometry that never moves.
+
+<Note>
+  The `mass` field is ignored for STATIC bodies. The bridge passes `mass=0.0` to the physics engine when creating static shapes, which is the convention pybullet and pymunk both use for immovable objects.
+</Note>
+
+## KINEMATIC
+
+A KINEMATIC body is moved manually by gameplay code — by writing `Transform2D` / `Transform3D` directly, or by calling `phys.set_position` / `phys.set_velocity`. The physics engine does not apply gravity or integrate forces on it. A kinematic body pushes DYNAMIC bodies aside on contact, but **it does not emit `CollisionEvent2D` or `CollisionEvent3D` against other KINEMATIC or STATIC bodies**.
+
+```python
+keel.RigidBody2D(body_type=keel.BodyType.KINEMATIC)
+```
+
+**Use KINEMATIC for:** player-controlled paddles, moving platforms driven by scripted paths, enemies with hand-coded patrol movement, any entity whose position you manage frame-to-frame in a system.
+
+## Collision event matrix
+
+This is the complete truth table for which body-type pairs emit `CollisionEvent2D` (and `CollisionEvent3D`):
+
+| Body A | Body B | Collision event fires? |
+|---|---|---|
+| DYNAMIC | DYNAMIC | ✅ Yes |
+| DYNAMIC | STATIC | ✅ Yes |
+| DYNAMIC | KINEMATIC | ✅ Yes |
+| DYNAMIC | Sensor (`sensor=True`) | ✅ Yes (sensor contact, `impulse=0`) |
+| KINEMATIC | KINEMATIC | ❌ No |
+| KINEMATIC | STATIC | ❌ No |
+| STATIC | STATIC | ❌ No |
+
+<Warning>
+  **KINEMATIC vs STATIC never emits events.** This is a pymunk and pybullet limitation, not a Keel bug. If you rely on events between a KINEMATIC entity and a STATIC entity, change at least one of them to DYNAMIC.
+</Warning>
+
+The rule is simple to remember: **at least one body must be DYNAMIC for a collision event to fire.**
+
+## Practical guide: which type to use
+
+<CardGroup cols={3}>
+  <Card title="DYNAMIC" icon="arrow-down-to-line">
+    **For:** balls, bullets, enemies, projectiles, physics objects, particles
+
+    Receives gravity. Deflected by collisions. Emits events against everything. Most flexible — if you're unsure, start here.
+  </Card>
+  <Card title="STATIC" icon="lock">
+    **For:** walls, floors, platforms, level boundaries
+
+    Never moves. Cheapest to simulate. Emits events only with DYNAMIC bodies. Ideal for world geometry you lay out at startup.
+  </Card>
+  <Card title="KINEMATIC" icon="gamepad">
+    **For:** player-controlled entities, scripted platforms, paddle/vehicle
+
+    Driven by code. Pushes DYNAMIC bodies. No events with other kinematics or statics. Use when you need physics-like pushing but control the trajectory yourself.
+  </Card>
+</CardGroup>
+
+## The kinematic ground-detection gotcha
+
+A common setup that silently fails:
+
+```python
+# Player — kinematic so you can move it yourself.
+player = app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.RigidBody2D(body_type=keel.BodyType.KINEMATIC),   # ← the trap
+    keel.Collider2D(shape_type=keel.ShapeType2D.BOX, width=32.0, height=48.0),
+)
+
+# Floor — static, never moves.
+floor = app.world.spawn(
+    keel.Transform2D(x=400.0, y=20.0),
+    keel.RigidBody2D(body_type=keel.BodyType.STATIC),
+    keel.Collider2D(shape_type=keel.ShapeType2D.BOX, width=800.0, height=20.0),
+)
+
+# This system will NEVER print anything.
+@app.system(keel.Phase.POST_UPDATE)
+def ground_check(world, dt):
+    for event in world.read_events(keel.CollisionEvent2D):
+        print("player touched floor!")   # never fires — K/S pair
+```
+
+**Fix options:**
+
+1. **Change the player to DYNAMIC** and let pymunk handle gravity. Use `phys.set_velocity` each frame to drive movement from input rather than writing `Transform2D` directly.
+2. **Poll position manually** — compare the player's `Transform2D.y` against the floor's known y-coordinate each frame. This is reliable and avoids physics entirely for ground detection.
+3. **Use a sensor shape** on the player with `sensor=True` and a separate DYNAMIC body underneath — but this is complex and rarely worth it.
+
+<Warning>
+  Keel emits a one-time `UserWarning` the first time a KINEMATIC/KINEMATIC or KINEMATIC/STATIC pair is created in `Physics2D`. This is your signal that the trap is active. Check the console when your collision callbacks stop firing.
+</Warning>
+
+## Full example: Pong-style setup
+
+This is the canonical Keel body-type pattern from the README. The ball is DYNAMIC so it registers every hit. The paddle is KINEMATIC so input code drives it. The walls are STATIC because they never move.
+
+```python
+import keel
+from keel.renderer import setup_renderer_2d
+from keel.physics import setup_physics_2d
+
+app = keel.App(title="Pong", width=800, height=600)
+setup_renderer_2d(app)
+setup_physics_2d(app, gravity_y=0.0)  # no gravity for Pong
+
+# Ball: needs to register every paddle / wall hit, so DYNAMIC.
+ball = app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.RigidBody2D(mass=1.0, body_type=keel.BodyType.DYNAMIC),
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.CIRCLE,
+        radius=8.0,
+        elasticity=1.0,
+    ),
+)
+
+# Paddle: moved manually by input, so KINEMATIC.
+paddle = app.world.spawn(
+    keel.Transform2D(x=40.0, y=300.0),
+    keel.RigidBody2D(body_type=keel.BodyType.KINEMATIC),
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.BOX,
+        width=15.0,
+        height=80.0,
+        elasticity=1.0,
+    ),
+)
+
+# Top wall: never moves, so STATIC.
+top_wall = app.world.spawn(
+    keel.Transform2D(x=400.0, y=595.0),
+    keel.RigidBody2D(body_type=keel.BodyType.STATIC),
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.BOX,
+        width=800.0,
+        height=10.0,
+        elasticity=1.0,
+    ),
+)
+
+# Bottom wall.
+bottom_wall = app.world.spawn(
+    keel.Transform2D(x=400.0, y=5.0),
+    keel.RigidBody2D(body_type=keel.BodyType.STATIC),
+    keel.Collider2D(
+        shape_type=keel.ShapeType2D.BOX,
+        width=800.0,
+        height=10.0,
+        elasticity=1.0,
+    ),
+)
+
+app.world.flush()
+
+PADDLE_SPEED = 300.0
+
+@app.system(keel.Phase.UPDATE)
+def move_paddle(world, dt):
+    if app.input.is_key_down(keel.KEY_W):
+        app.world.set(paddle, keel.Transform2D,
+                      y=app.world.get(paddle, keel.Transform2D)['y'] + PADDLE_SPEED * dt)
+    if app.input.is_key_down(keel.KEY_S):
+        app.world.set(paddle, keel.Transform2D,
+                      y=app.world.get(paddle, keel.Transform2D)['y'] - PADDLE_SPEED * dt)
+
+@app.system(keel.Phase.POST_UPDATE)
+def on_collision(world, dt):
+    for event in world.read_events(keel.CollisionEvent2D):
+        # ball vs paddle or ball vs wall — fires because ball is DYNAMIC.
+        print(f"hit! impulse={event.impulse:.1f}")
+        # paddle vs wall — does NOT fire (K/S pair), which is what we want.
+
+app.run()
+```
+
+That arrangement gets ball-vs-paddle and ball-vs-wall collision events. Paddle-vs-wall does not fire because KINEMATIC-vs-STATIC emits nothing — exactly the right behavior, since the gameplay code is already clamping the paddle's y within the playfield bounds.
+
+## IntEnum interop
+
+Because `BodyType` is an `IntEnum`, you can use it anywhere an integer is expected:
+
+```python
+# These are all equivalent.
+keel.RigidBody2D(body_type=keel.BodyType.STATIC)
+keel.RigidBody2D(body_type=1)
+
+# Comparison always works.
+assert keel.BodyType.STATIC == 1
+assert keel.BodyType.DYNAMIC == 0
+assert keel.BodyType.KINEMATIC == 2
+
+# int() cast works too.
+print(int(keel.BodyType.KINEMATIC))   # 2
+```
+
+The same interop applies to `ShapeType2D` and `ShapeType3D`:
+
+```python
+keel.ShapeType2D.CIRCLE  == 0   # True
+keel.ShapeType2D.BOX     == 1   # True
+keel.ShapeType2D.SEGMENT == 2   # True
+
+keel.ShapeType3D.SPHERE  == 0   # True
+keel.ShapeType3D.BOX     == 1   # True
+keel.ShapeType3D.CAPSULE == 2   # True
+keel.ShapeType3D.MESH    == 3   # True
+```
+
+Prefer the named enum forms in new code. Raw ints are supported for backwards compatibility but reduce readability.

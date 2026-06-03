@@ -1,20 +1,111 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Keel: Python Game Engine with Archetype ECS"
+sidebarTitle: "Home"
+description: "Keel is a Python game engine built on an archetype ECS, ModernGL rendering, pymunk/pybullet physics, and miniaudio — structured game development that stays in Python."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Keel is the backbone of your game. It combines a data-oriented archetype ECS, GPU-accelerated 2D and 3D rendering via ModernGL, physics simulation through pymunk and pybullet, audio via miniaudio, and a hot-reloading developer loop — all from Python. Install from PyPI as `keelpy`, import as `keel`, and be rendering a sprite in under twenty lines.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Keel from PyPI, choose optional extras for 3D physics and dev tooling, and verify your setup.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build a moving sprite, add a bouncing ball with physics, and run your first Keel game in minutes.
+  </Card>
+  <Card title="ECS Concepts" icon="cubes" href="/concepts/ecs">
+    Understand archetypes, components, queries, and how data flows through the world each frame.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/app">
+    Explore the full public surface: App, World, Scheduler, components, physics, rendering, and more.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## What Keel Provides
+
+Keel is designed for developers who want to stay in Python and write structured game code on top of a real archetype-based ECS. Hot paths push work into numpy and C extensions (ModernGL, pymunk, pybullet) while the rest stays as plain Python.
+
+<CardGroup cols={3}>
+  <Card title="Archetype ECS" icon="table" href="/concepts/ecs">
+    Struct-of-arrays layout with numpy. Queries return column views, not copies.
+  </Card>
+  <Card title="2D Rendering" icon="image" href="/rendering/renderer-2d">
+    Instanced sprite batcher, texture atlas, orthographic camera, tilemap.
+  </Card>
+  <Card title="3D Rendering" icon="cube" href="/rendering/renderer-3d">
+    OBJ loader, PBR-lite materials, directional + point lights, frustum culling.
+  </Card>
+  <Card title="Physics" icon="circle" href="/physics/physics-2d">
+    2D via pymunk (rigid bodies, shapes, raycasts) and 3D via pybullet.
+  </Card>
+  <Card title="Audio" icon="volume-high" href="/systems/audio">
+    One-shot sound effects, streaming music, per-channel volume, fade in/out.
+  </Card>
+  <Card title="Hot Reload" icon="arrows-rotate" href="/tooling/hot-reload">
+    `keel run` watches `.py` files and restarts the process on every save.
+  </Card>
+</CardGroup>
+
+## Get Started in 3 Steps
+
+<Steps>
+  <Step title="Install Keel">
+    Install the `keelpy` package from PyPI. The import name is `keel`:
+    ```bash
+    pip install keelpy
+    ```
+    For 3D physics and developer tooling:
+    ```bash
+    pip install "keelpy[physics3d,tools]"
+    ```
+  </Step>
+  <Step title="Scaffold a new project">
+    Use the CLI to create a project with the right directory layout and a working `main.py`:
+    ```bash
+    keel new mygame
+    cd mygame
+    ```
+  </Step>
+  <Step title="Run with hot reload">
+    Start the dev loop. Save any `.py` file and the engine restarts automatically:
+    ```bash
+    keel run
+    ```
+  </Step>
+</Steps>
+
+## Minimal Example
+
+A window with a white square you can move with WASD. `texture_id=0` is always a 1×1 white pixel — no asset files needed to start.
+
+```python main.py
+import keel
+from keel.renderer import setup_renderer_2d
+
+app = keel.App(title="Hello Keel", width=800, height=600)
+setup_renderer_2d(app)
+
+@keel.component
+class Player:
+    speed: float = 200.0
+
+app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.Sprite(texture_id=0, width=32.0, height=32.0),
+    Player(),
+)
+
+@app.system(keel.Phase.UPDATE)
+def move(world, dt):
+    for transform, player in world.query(keel.Transform2D, Player):
+        if app.input.is_key_down(keel.KEY_D): transform['x'] += player['speed'] * dt
+        if app.input.is_key_down(keel.KEY_A): transform['x'] -= player['speed'] * dt
+        if app.input.is_key_down(keel.KEY_W): transform['y'] += player['speed'] * dt
+        if app.input.is_key_down(keel.KEY_S): transform['y'] -= player['speed'] * dt
+
+app.run()
+```
+
+<Note>
+  The PyPI package name is `keelpy`. The import name is `keel`. Run `pip install keelpy`, then `import keel` in your code.
+</Note>

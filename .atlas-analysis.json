@@ -1,0 +1,179 @@
+{
+  "projectType": "framework",
+  "projectName": "Keel",
+  "projectDescription": "A Python game engine with archetype ECS, ModernGL 2D/3D rendering, physics, text, audio, and hot reload.",
+  "theme": "palm",
+  "primaryColor": "#dedede",
+  "lightColor": "#fbde58",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guide",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/ecs",
+              "concepts/app-and-loop",
+              "concepts/systems-and-phases",
+              "concepts/events"
+            ]
+          },
+          {
+            "group": "Rendering",
+            "pages": [
+              "rendering/renderer-2d",
+              "rendering/renderer-3d",
+              "rendering/camera",
+              "rendering/tilemap",
+              "rendering/text"
+            ]
+          },
+          {
+            "group": "Physics",
+            "pages": [
+              "physics/physics-2d",
+              "physics/physics-3d",
+              "physics/body-types"
+            ]
+          },
+          {
+            "group": "Input, Audio & Assets",
+            "pages": [
+              "systems/input",
+              "systems/audio",
+              "systems/assets"
+            ]
+          },
+          {
+            "group": "Tooling",
+            "pages": [
+              "tooling/dev-tools",
+              "tooling/cli",
+              "tooling/hot-reload"
+            ]
+          },
+          {
+            "group": "Examples & Patterns",
+            "pages": [
+              "examples/common-patterns",
+              "examples/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "App & World",
+            "pages": [
+              "api/app",
+              "api/world",
+              "api/scheduler"
+            ]
+          },
+          {
+            "group": "Components",
+            "pages": [
+              "api/components/transform",
+              "api/components/rendering",
+              "api/components/physics",
+              "api/components/audio"
+            ]
+          },
+          {
+            "group": "Systems & Events",
+            "pages": [
+              "api/phase",
+              "api/events"
+            ]
+          },
+          {
+            "group": "Modules",
+            "pages": [
+              "api/renderer",
+              "api/physics-api",
+              "api/text-api",
+              "api/audio-api",
+              "api/assets-api",
+              "api/input-api"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Archetype ECS with numpy structured array storage and struct-of-arrays layout",
+    "ModernGL-based 2D sprite batcher and 3D PBR renderer",
+    "2D physics via pymunk and 3D physics via pybullet",
+    "Typed event bus cleared each frame",
+    "Asset hot reload via watchdog file watcher",
+    "Text rendering with freetype-py and a bundled fallback font",
+    "Audio engine backed by miniaudio",
+    "Gamepad support via GLFW",
+    "CLI scaffold and hot-reload dev loop",
+    "ImGui world inspector, frame profiler, and 2D debug draw"
+  ],
+  "publicApiSurface": [
+    "keel.App",
+    "keel.World",
+    "keel.component",
+    "keel.event",
+    "keel.Phase",
+    "keel.Transform2D",
+    "keel.Transform3D",
+    "keel.Sprite",
+    "keel.TextLabel",
+    "keel.MeshRenderer",
+    "keel.setup_renderer_2d",
+    "keel.setup_renderer_3d",
+    "keel.setup_tilemap",
+    "keel.setup_physics_2d",
+    "keel.setup_physics_3d",
+    "keel.RigidBody2D",
+    "keel.RigidBody3D",
+    "keel.Collider2D",
+    "keel.Collider3D",
+    "keel.BodyType",
+    "keel.ShapeType2D",
+    "keel.ShapeType3D",
+    "keel.CollisionEvent2D",
+    "keel.CollisionEvent3D",
+    "keel.setup_text",
+    "keel.load_font",
+    "keel.set_text",
+    "keel.setup_audio",
+    "keel.play_sound",
+    "keel.play_music",
+    "keel.setup_assets",
+    "keel.setup_gamepad",
+    "keel.dev_tools",
+    "keel.Camera2D",
+    "keel.Camera3D",
+    "keel.DirectionalLight",
+    "keel.PointLight",
+    "World.spawn",
+    "World.despawn",
+    "World.query",
+    "World.query_one",
+    "World.get",
+    "World.set",
+    "World.emit",
+    "World.read_events",
+    "World.flush",
+    "World.insert_resource",
+    "Scheduler.register",
+    "keel new / keel run / keel build (CLI)"
+  ]
+}

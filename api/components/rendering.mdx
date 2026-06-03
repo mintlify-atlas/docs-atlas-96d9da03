@@ -1,0 +1,193 @@
+---
+title: "Rendering Components: Sprite, MeshRenderer, TextLabel"
+sidebarTitle: "Rendering"
+description: "Sprite drives 2D instanced rendering. MeshRenderer ties a 3D entity to a mesh and material. TextLabel renders screen-space text via freetype-py."
+---
+
+Keel separates rendering data from rendering logic. The three rendering components — `Sprite`, `MeshRenderer`, and `TextLabel` — carry only the declarative state the renderers need. The actual draw calls are issued by the systems registered in `setup_renderer_2d`, `setup_renderer_3d`, and `setup_text`. You never call draw methods yourself.
+
+---
+
+## Sprite
+
+`Sprite` makes a 2D entity visible as a textured quad. It pairs with `Transform2D` on the same entity; the `SpriteBatch2D` system queries both every frame and issues a single instanced draw call per texture group. The full RGBA tint is multiplied against the sampled texel, so `(r=1, g=1, b=1, a=1)` is fully opaque white (no tint).
+
+`texture_id` is the integer returned by `atlas.load("path/to/image.png")` or `setup_assets` + `registry.load(...)`. Texture ID `0` is always a 1×1 white pixel baked in by `setup_renderer_2d`, which makes plain color quads possible without loading any image.
+
+```python
+import keel
+
+app = keel.App()
+renderer = keel.setup_renderer_2d(app)
+
+# Load a sprite sheet and spawn an entity
+hero_id = renderer.atlas.load("assets/hero.png")
+app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.Sprite(texture_id=hero_id, width=64.0, height=64.0),
+)
+
+# Solid red square — no texture needed
+app.world.spawn(
+    keel.Transform2D(x=100.0, y=100.0),
+    keel.Sprite(r=1.0, g=0.0, b=0.0, width=32.0, height=32.0),
+)
+```
+
+### Fields
+
+<ParamField path="texture_id" type="int" default="0">
+  Index into the active `TextureAtlas`. Returned by `atlas.load(path)`. ID `0` is the built-in 1×1 white texture, safe to use for colored quads without loading any file.
+</ParamField>
+
+<ParamField path="r" type="float" default="1.0">
+  Red channel of the RGBA tint multiplied against the sampled texture. Range `[0.0, 1.0]`.
+</ParamField>
+
+<ParamField path="g" type="float" default="1.0">
+  Green channel of the RGBA tint. Range `[0.0, 1.0]`.
+</ParamField>
+
+<ParamField path="b" type="float" default="1.0">
+  Blue channel of the RGBA tint. Range `[0.0, 1.0]`.
+</ParamField>
+
+<ParamField path="a" type="float" default="1.0">
+  Alpha channel of the RGBA tint. `1.0` is fully opaque, `0.0` is invisible. The sprite batch renders with alpha blending when `a < 1.0`.
+</ParamField>
+
+<ParamField path="width" type="float" default="64.0">
+  Width of the quad in world units (pixels at default zoom). Multiplied by `Transform2D.scale_x` before upload. A negative value mirrors the quad horizontally.
+</ParamField>
+
+<ParamField path="height" type="float" default="64.0">
+  Height of the quad in world units. Multiplied by `Transform2D.scale_y`. A negative value mirrors the quad vertically.
+</ParamField>
+
+<ParamField path="flip_x" type="bool" default="False">
+  When `True`, negates the effective width in the instance buffer, flipping the quad horizontally without changing its UV rectangle. Useful for left/right character facing without separate sprites.
+</ParamField>
+
+<ParamField path="flip_y" type="bool" default="False">
+  When `True`, negates the effective height, flipping the quad vertically.
+</ParamField>
+
+<Note>
+  The `TextureAtlas` supports up to 16 textures (the minimum GL guarantee for fragment shader sampler units). Plan your atlas layout around this limit; a sprite sheet with sub-rectangle UVs is the recommended approach for games with many art assets.
+</Note>
+
+---
+
+## MeshRenderer
+
+`MeshRenderer` makes a 3D entity visible by linking it to a mesh and a material from the `MeshRegistry` and `MaterialRegistry` created by `setup_renderer_3d`. The renderer queries `(Transform3D, MeshRenderer)` each frame, frustum-culls by bounding sphere, resolves the world matrix through the parent chain, uploads PBR-lite uniforms, and issues one draw call per surviving entity.
+
+```python
+import keel
+from keel import make_cube, Material
+
+app = keel.App()
+r3d = keel.setup_renderer_3d(app)
+
+# Register a mesh and a material
+cube_id = r3d.mesh_registry.add(make_cube())
+mat_id = r3d.material_registry.add(
+    Material(albedo_r=0.2, albedo_g=0.6, albedo_b=1.0, roughness=0.4)
+)
+
+# Spawn a visible cube
+app.world.spawn(
+    keel.Transform3D(x=0.0, y=0.0, z=-5.0),
+    keel.MeshRenderer(mesh_id=cube_id, material_id=mat_id),
+)
+```
+
+### Fields
+
+<ParamField path="mesh_id" type="int" default="0">
+  Index into `MeshRegistry`, returned by `mesh_registry.add(mesh)`. If the ID is out of range the entity is silently skipped.
+</ParamField>
+
+<ParamField path="material_id" type="int" default="0">
+  Index into `MaterialRegistry`, returned by `material_registry.add(material)`. ID `0` is always the default mid-gray `Material()`. Out-of-range IDs fall back to the default.
+</ParamField>
+
+<ParamField path="cast_shadows" type="bool" default="True">
+  Reserved for future shadow-map support. Currently has no runtime effect; stored in the component for forward compatibility.
+</ParamField>
+
+<ParamField path="receive_shadows" type="bool" default="True">
+  Reserved for future shadow-map support. Currently has no runtime effect.
+</ParamField>
+
+<ParamField path="visible" type="bool" default="True">
+  When `False`, the entity is skipped entirely by the 3D render system — no frustum cull check, no draw call. Use this to hide entities without despawning them.
+</ParamField>
+
+---
+
+## TextLabel
+
+`TextLabel` renders a string of text in **screen space**, anchored to a `Transform2D` position interpreted as pixels with the origin at the top-left and Y growing downward. Text does not scroll with the camera — it is always UI space. Pair with `keel.text.set_text(entity_id, "...")` to set the string content.
+
+The actual text string is stored in a module-level side dict (not in the component) because NumPy structured arrays cannot hold variable-length strings. This is a known v0.1 limitation and will be resolved in v0.2.
+
+```python
+import keel
+
+app = keel.App()
+keel.setup_renderer_2d(app)
+text_setup = keel.setup_text(app)
+font = keel.load_font(app, keel.BUILTIN_FONT, size_px=28)
+
+label_entity = app.world.spawn(
+    keel.Transform2D(x=10.0, y=30.0),          # top-left corner, y ≈ ascender
+    keel.TextLabel(font_id=text_setup.font_registry.id_of(font), r=1.0, g=1.0, b=1.0),
+)
+keel.set_text(label_entity, "Score: 0")
+```
+
+<Warning>
+  The baseline of the text sits at `Transform2D.y`. For a 28 px font the ascender is roughly 22–26 px, so set `y ≈ 28` or higher to keep the top of the glyphs visible near the top of the window.
+</Warning>
+
+### Fields
+
+<ParamField path="font_id" type="int" default="0">
+  Index into the `FontRegistry`, returned by `font_registry.id_of(font)` after loading with `load_font`. Each `(path, size_px)` pair is cached as a separate `Font` with its own GPU texture atlas.
+</ParamField>
+
+<ParamField path="r" type="float" default="1.0">
+  Red channel of the text color. The shader multiplies this against the glyph coverage (alpha). Range `[0.0, 1.0]`.
+</ParamField>
+
+<ParamField path="g" type="float" default="1.0">
+  Green channel of the text color. Range `[0.0, 1.0]`.
+</ParamField>
+
+<ParamField path="b" type="float" default="1.0">
+  Blue channel of the text color. Range `[0.0, 1.0]`.
+</ParamField>
+
+<ParamField path="a" type="float" default="1.0">
+  Alpha channel. `1.0` is fully opaque. The text batch always draws with `SRC_ALPHA / ONE_MINUS_SRC_ALPHA` blending regardless of this value.
+</ParamField>
+
+<ParamField path="scale" type="float" default="1.0">
+  Uniform scale applied to glyph quads and advances. `2.0` doubles the rendered font size without re-baking the atlas.
+</ParamField>
+
+<ParamField path="visible" type="bool" default="True">
+  When `False`, this entity is skipped by the text render system. Toggle with `keel.set_label_visible(world, entity_id, False)` for convenience.
+</ParamField>
+
+### Side-table text API
+
+Because the text string lives outside the component, use these module-level functions:
+
+```python
+keel.set_text(entity_id, "Hello, world!")  # set or replace content
+keel.get_text(entity_id)                   # returns "" if unset
+keel.clear_text(entity_id)                 # removes the entry
+keel.set_label_visible(world, entity_id, False)  # hide without despawning
+```

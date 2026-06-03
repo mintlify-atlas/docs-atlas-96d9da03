@@ -1,0 +1,108 @@
+---
+title: "Keel: A Python Game Engine Built on Archetype ECS"
+sidebarTitle: "Introduction"
+description: "Keel is a Python game engine combining archetype ECS, ModernGL 2D/3D rendering, pymunk/pybullet physics, and miniaudio — structured game development without leaving Python."
+---
+
+Keel is a Python game engine whose tagline is *"the backbone of your game."* It gives you a real archetype-based Entity Component System at the core, a ModernGL renderer for both 2D sprites and 3D meshes, physics bridges to pymunk and pybullet, audio via miniaudio, and a CLI with hot-reloading — all in plain Python. The tradeoff is honest: Python has interpreter overhead, so Keel pushes hot paths into numpy and C extensions (ModernGL, pymunk, pybullet) and exposes the rest as clean Python APIs you can read, debug, and extend without leaving your editor.
+
+## Why Keel?
+
+Pygame is old, single-threaded, and bound to CPU blits. Panda3D is a Python wrapper around a C++ engine, carrying the cognitive load that implies. Other Python options stop at hobby scope or no longer maintain a release. None of them provide a modern, data-oriented ECS as the core data model.
+
+Keel is for developers who want to stay in Python and write structured game code on top of a real archetype-based ECS. Components are plain dataclasses. Systems are plain functions. Queries return numpy array views that mutate in place. You get the same data-oriented discipline found in modern C++ engines without leaving the Python ecosystem.
+
+## Feature Overview
+
+<CardGroup cols={3}>
+  <Card
+    title="Archetype ECS"
+    icon="layer-group"
+    href="/concepts/ecs"
+  >
+    Struct-of-arrays storage with one numpy structured array per component type per archetype. Query DSL, typed event bus, deferred command buffer, and resource injection — all composable.
+  </Card>
+  <Card
+    title="2D Rendering"
+    icon="image"
+    href="/rendering/renderer-2d"
+  >
+    Instanced sprite batcher with one draw call per texture group, a 16-unit texture atlas, orthographic camera with translation/rotation/zoom, and chunked tilemap support.
+  </Card>
+  <Card
+    title="3D Rendering"
+    icon="cube"
+    href="/rendering/renderer-3d"
+  >
+    OBJ loader, PBR-lite materials, directional light plus up to 8 point lights, sphere-based frustum culling, Transform3D hierarchy, and built-in cube/plane/UV sphere primitives.
+  </Card>
+  <Card
+    title="Physics"
+    icon="atom"
+    href="/physics/physics-2d"
+  >
+    2D bridge to pymunk (rigid bodies, shapes, collision events, raycasts) and optional 3D bridge to pybullet. Both bridges run at `Phase.POST_UPDATE` with the ECS as the source of truth.
+  </Card>
+  <Card
+    title="Audio"
+    icon="volume-high"
+    href="/systems/audio"
+  >
+    miniaudio-backed `AudioEngine` with one-shot sound effects, streaming music tracks, per-channel volume control, fade in/out, and an `AudioSource` component for entity-bound sounds.
+  </Card>
+  <Card
+    title="Dev Tooling"
+    icon="wrench"
+    href="/tooling/cli"
+  >
+    ImGui world inspector (F1), per-system frame profiler overlay (F2), physics debug draw (F3), hot-reloading CLI (`keel run`), and project scaffolding (`keel new`).
+  </Card>
+</CardGroup>
+
+## Architecture
+
+`App` is the single top-level object. It owns:
+
+- **`World`** — the ECS database: archetypes, component storage, event queues, resources, and the command buffer.
+- **`Scheduler`** — a phase-ordered system runner that drives `PRE_UPDATE → UPDATE → POST_UPDATE → RENDER → POST_RENDER` each tick.
+- **`Window`** — a GLFW window plus a shared ModernGL context exposed as `app.ctx`.
+- **`InputState`** — held-state and edge-detected helpers for keyboard, mouse, and gamepad, updated once per simulation tick.
+
+The fixed-timestep loop runs at **60 Hz** simulation. Rendering happens once per visual frame regardless of how many simulation ticks accumulated. Renderers are plain systems registered at `Phase.RENDER`; they read components through `world.query` and issue draw calls via ModernGL. Physics bridges run at `Phase.POST_UPDATE`, sync ECS state into the physics engine, step it, and write results back into `Transform` components.
+
+Every layer communicates with the next through public ECS APIs only, so adding or replacing a layer does not require changes to the others.
+
+```
+App
+├── World  (archetypes · event bus · resources · command buffer)
+├── Scheduler  (PRE_UPDATE → UPDATE → POST_UPDATE → RENDER → POST_RENDER)
+├── Window  (GLFW + ModernGL context)
+└── InputState  (keyboard · mouse · gamepad)
+```
+
+<Note>
+  The `Scheduler` registered on `App` and the scheduler accessible via `World.scheduler` are the same object. Systems registered with `@app.system(phase)` and `@world.system(phase)` both target the same registry.
+</Note>
+
+## Deferred Structural Changes
+
+Calling `world.spawn`, `world.despawn`, `world.add_component`, or `world.remove_component` queues a command in an internal buffer. Nothing moves between archetypes until `world.flush()` runs, which the main loop calls at the end of every frame. This keeps query iteration stable for the entire frame — you can spawn entities from inside a system without invalidating the views you are currently iterating.
+
+## License
+
+Keel is released under the **MIT License**. Pull requests are welcome — run `pytest` before submitting; the suite covers every phase and is fast.
+
+## Roadmap
+
+The following features are planned for future releases:
+
+- **Skeletal animation** — bone hierarchies, blend trees, and animation clips for 2D and 3D meshes.
+- **Parallel system execution** — opt-in multi-threaded scheduler for CPU-bound systems.
+- **WASM export via Pyodide** — ship a Keel game as a browser-playable bundle.
+- **Visual scene editor** — drag-and-drop entity authoring with live ECS inspection.
+- World-space text (text that moves with the camera)
+- 3D audio / positional audio
+
+<Tip>
+  Keel is currently at **v0.8.5** with 451 passing tests across Windows, Linux, and macOS. The public API is stable for all documented features; roadmap items are not yet part of the stable surface.
+</Tip>

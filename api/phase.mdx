@@ -1,0 +1,188 @@
+---
+title: "Phase — System Execution Order"
+sidebarTitle: "Phase"
+description: "Phase is an IntEnum defining the order systems run each tick: PRE_UPDATE(0), UPDATE(1), POST_UPDATE(2), PRE_RENDER(3), RENDER(4), POST_RENDER(5)."
+---
+
+`Phase` is an `IntEnum` that controls the order in which systems execute during each tick. The run loop advances simulation phases at a fixed 60 Hz rate and render phases once per visual frame. Register every system in the phase that best matches its role so Keel's scheduler can enforce safe execution order without manual dependency declarations.
+
+```python
+import keel
+
+app = keel.App()
+
+@app.system(keel.Phase.UPDATE)
+def move(world, dt):
+    for (pos, vel) in world.query(Position, Velocity):
+        pos["x"] += vel["vx"] * dt
+        pos["y"] += vel["vy"] * dt
+
+app.run()
+```
+
+---
+
+## Phase Values
+
+<CardGroup cols={2}>
+  <Card title="PRE_UPDATE — 0" icon="arrow-up-from-line">
+    Runs before the main update. Asset hot-reload drains here: changed files are detected, assets re-loaded, and dependent entities updated before any game logic sees the new data.
+  </Card>
+  <Card title="UPDATE — 1" icon="play">
+    Main game logic phase. AI, player input processing, state machines, and anything that should advance the simulation each tick belong here.
+  </Card>
+  <Card title="POST_UPDATE — 2" icon="arrow-down-to-line">
+    Physics bridges run here. After game logic mutates velocities and positions in UPDATE, the physics engine reads those values, steps the simulation, and writes corrected transforms back.
+  </Card>
+  <Card title="PRE_RENDER — 3" icon="camera">
+    Camera updates and culling setup. Systems that derive the view/projection matrix or compute visibility lists run here so the RENDER phase has a stable camera each frame.
+  </Card>
+  <Card title="RENDER — 4" icon="paintbrush">
+    Draw calls. Sprite batching, mesh submission, and particle system rendering all execute in this phase. The ModernGL context is active and the framebuffer is writable.
+  </Card>
+  <Card title="POST_RENDER — 5" icon="layer-group">
+    Debug draw overlay and ImGui submission. The debug-draw system flushes GL line primitives here; the inspector panel submits its ImGui draw list on top, so the inspector always renders above scene geometry.
+  </Card>
+</CardGroup>
+
+---
+
+## Simulation vs Render Phases
+
+Keel's run loop separates phases into two groups that run at different cadences:
+
+| Group | Phases | Rate |
+|---|---|---|
+| **Simulation** | `PRE_UPDATE`, `UPDATE`, `POST_UPDATE` | Fixed 1/60 s (`keel.FIXED_DT`) |
+| **Render** | `PRE_RENDER`, `RENDER`, `POST_RENDER` | Once per visual frame (variable `dt`) |
+
+Systems in simulation phases always receive `dt == keel.FIXED_DT` (≈ 16.67 ms). Systems in render phases receive the real elapsed wall-clock time for the frame, which may be shorter or longer depending on display refresh rate and host load. Use `RenderState.alpha` (available as a world resource) for sub-tick interpolation in render systems.
+
+<Note>
+  Because simulation phases may run **multiple times** per visual frame (when the machine is slow) or **zero times** (when the frame is very fast), render systems must not write simulation state. Only read from components; use `alpha` to blend between previous and current positions for smooth visuals.
+</Note>
+
+---
+
+## Usage Examples
+
+### Registering systems to each phase
+
+```python
+import keel
+
+app = keel.App()
+
+# PRE_UPDATE — drain asset changes before any game logic
+@app.system(keel.Phase.PRE_UPDATE)
+def hot_reload(world, dt, assets: keel.AssetRegistry):
+    assets.poll()
+
+# UPDATE — main game logic
+@app.system(keel.Phase.UPDATE)
+def player_input(world, dt, inp: keel.InputState):
+    for (vel,) in world.query(Velocity, keel.Without[Frozen]):
+        if inp.is_key_down(keel.KEY_RIGHT):
+            vel["vx"] = 200.0
+        elif inp.is_key_down(keel.KEY_LEFT):
+            vel["vx"] = -200.0
+        else:
+            vel["vx"] = 0.0
+
+# POST_UPDATE — physics runs after all velocity changes are settled
+@app.system(keel.Phase.POST_UPDATE)
+def physics_step(world, dt, phys: keel.Physics2D):
+    phys.step(world, dt)
+
+# PRE_RENDER — update camera before drawing
+@app.system(keel.Phase.PRE_RENDER)
+def update_camera(world, dt, cam: keel.Camera2D):
+    gs = world.query_one(GameState)
+    if gs:
+        cam.look_at(gs["target_x"], gs["target_y"])
+
+# RENDER — draw calls
+@app.system(keel.Phase.RENDER)
+def draw(world, dt, renderer: keel.Renderer2DSetup):
+    renderer.draw_sprites(world)
+
+# POST_RENDER — debug info on top of everything
+@app.system(keel.Phase.POST_RENDER)
+def show_fps(world, dt):
+    ...
+
+app.run()
+```
+
+---
+
+### Ordering systems within a phase
+
+Use the `after` parameter to express ordering constraints within a single phase. The scheduler topologically sorts the phase list and rejects cycles or cross-phase dependencies with `ValueError`.
+
+```python
+@app.system(keel.Phase.UPDATE)
+def compute_steering(world, dt): ...
+
+@app.system(keel.Phase.UPDATE)
+def apply_separation(world, dt): ...
+
+# integrate_velocity always runs after both compute_steering and apply_separation
+@app.system(keel.Phase.UPDATE, after=[compute_steering, apply_separation])
+def integrate_velocity(world, dt): ...
+```
+
+---
+
+### Using Phase directly
+
+`Phase` is an `IntEnum`, so you can iterate over all phases or compare them:
+
+```python
+for phase in keel.Phase:
+    systems = app.scheduler.systems(phase)
+    print(f"{phase.name} ({phase.value}): {len(systems)} systems")
+
+# Output:
+# PRE_UPDATE (0): 1 systems
+# UPDATE (1): 3 systems
+# POST_UPDATE (2): 1 systems
+# PRE_RENDER (3): 1 systems
+# RENDER (4): 1 systems
+# POST_RENDER (5): 0 systems
+```
+
+---
+
+### Running specific phase groups manually
+
+In headless tests or custom loops you can run only the phases you need:
+
+```python
+world = keel.World()
+
+@world.system(keel.Phase.UPDATE)
+def step_ai(world, dt): ...
+
+# Run only simulation phases — no rendering overhead
+world.scheduler.tick_simulation(world, keel.FIXED_DT)
+world.flush()
+
+# Or pick arbitrary phases
+world.scheduler.tick_phases(world, keel.FIXED_DT,
+                             [keel.Phase.PRE_UPDATE, keel.Phase.UPDATE])
+world.flush()
+```
+
+---
+
+## Phase Reference
+
+| Constant | Value | Typical use |
+|---|---|---|
+| `keel.Phase.PRE_UPDATE` | `0` | Asset hot-reload, input preprocessing |
+| `keel.Phase.UPDATE` | `1` | AI, player input, state machines, timers |
+| `keel.Phase.POST_UPDATE` | `2` | Physics bridges, collision response |
+| `keel.Phase.PRE_RENDER` | `3` | Camera, culling, shadow map updates |
+| `keel.Phase.RENDER` | `4` | Sprite/mesh/particle draw calls |
+| `keel.Phase.POST_RENDER` | `5` | Debug overlays, ImGui, profiler HUD |

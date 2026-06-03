@@ -1,47 +1,246 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Quickstart: Build Your First Keel Game"
+sidebarTitle: "Quickstart"
+description: "Get a Keel game running in minutes. Spawn a sprite, move it with WASD, add physics, and enable developer tools — all from scratch with no asset files needed."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This guide takes you from a fresh Python environment to a running Keel game in five steps. You will build a movable sprite, add a bouncing physics ball, and turn on the built-in developer tools — all without creating any image or audio files. Every example on this page is a complete, runnable program.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Install Keel">
+    Install Keel from PyPI. The distribution name is `keelpy`; the import name you use in code is `keel`.
 
     ```bash
-    npm install your-package
+    pip install keelpy
     ```
+
+    Need 3D physics or the ImGui dev tools? See the [Installation](/installation) page for optional extras.
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Scaffold a project">
+    The Keel CLI creates the standard project layout and a hot-reloading dev loop in one command:
 
     ```bash
-    your-cli init
+    keel new mygame
+    cd mygame
     ```
+
+    This produces:
+
+    ```
+    mygame/
+    ├── main.py
+    ├── pyproject.toml
+    ├── README.md
+    ├── assets/
+    │   └── .gitkeep
+    └── scenes/
+        └── .gitkeep
+    ```
+
+    `assets/` is monitored by the asset hot-reload system. `scenes/` is the conventional home for `Scene.save` JSON output. You can skip scaffolding and write a `main.py` directly — the scaffold just saves the boilerplate.
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Minimal sprite example">
+    Replace `main.py` (or create it fresh) with the following. It opens an 800×600 window and lets you drive a white square around with WASD.
+
+    <Note>
+      `texture_id=0` is always the engine's built-in 1×1 white pixel texture. The renderer multiplies the sprite's RGB tint into it, giving you solid-colored quads with zero asset setup. You never need an image file to get started.
+    </Note>
+
+    ```python main.py
+    import keel
+    from keel.renderer import setup_renderer_2d
+
+    app = keel.App(title="Hello Keel", width=800, height=600)
+    setup_renderer_2d(app)
+
+    @keel.component
+    class Player:
+        speed: float = 200.0
+
+    player = app.world.spawn(
+        keel.Transform2D(x=400.0, y=300.0),
+        keel.Sprite(texture_id=0, width=32.0, height=32.0),
+        Player(),
+    )
+
+    @app.system(keel.Phase.UPDATE)
+    def move(world, dt):
+        for transform, player in world.query(keel.Transform2D, Player):
+            if app.input.is_key_down(keel.KEY_D):
+                transform['x'] += player['speed'] * dt
+            if app.input.is_key_down(keel.KEY_A):
+                transform['x'] -= player['speed'] * dt
+            if app.input.is_key_down(keel.KEY_W):
+                transform['y'] += player['speed'] * dt
+            if app.input.is_key_down(keel.KEY_S):
+                transform['y'] -= player['speed'] * dt
+
+    app.run()
+    ```
+
+    Run it:
 
     ```bash
-    your-cli start
+    python main.py
+    ```
+
+    A few things to notice:
+
+    - `@keel.component` turns a plain dataclass into an ECS component. `float` fields map to `float64` numpy columns automatically.
+    - `world.query(keel.Transform2D, Player)` returns per-archetype numpy array *views* — the in-place assignments (`transform['x'] += ...`) write directly back to ECS storage.
+    - `app.input.is_key_down` checks held state every simulation tick at 60 Hz. For one-shot actions (fire, jump), use `is_key_pressed` instead.
+  </Step>
+
+  <Step title="Physics example: bouncing ball">
+    This standalone program adds 2D physics. A dynamic ball falls under gravity and bounces on a static floor. Paste it into a new file or replace `main.py`.
+
+    ```python main.py
+    import keel
+    from keel.renderer import setup_renderer_2d
+    from keel.physics import setup_physics_2d
+
+    app = keel.App(title="Bouncing Ball", width=800, height=600)
+    setup_renderer_2d(app)
+    setup_physics_2d(app, gravity_y=-980.0)
+
+    tools = keel.dev_tools(app)
+    tools.debug_draw.set_visible(True)
+
+    # Static floor — never moves, generates collision events with dynamic bodies.
+    app.world.spawn(
+        keel.Transform2D(x=400.0, y=50.0),
+        keel.RigidBody2D(body_type=keel.BodyType.STATIC),
+        keel.Collider2D(
+            shape_type=keel.ShapeType2D.BOX,
+            width=600.0,
+            height=20.0,
+            elasticity=0.6,
+        ),
+    )
+
+    # Dynamic ball — affected by gravity and collision.
+    app.world.spawn(
+        keel.Transform2D(x=400.0, y=500.0),
+        keel.RigidBody2D(mass=1.0, body_type=keel.BodyType.DYNAMIC),
+        keel.Collider2D(
+            shape_type=keel.ShapeType2D.CIRCLE,
+            radius=20.0,
+            elasticity=0.75,
+        ),
+    )
+
+    @app.system(keel.Phase.UPDATE)
+    def log_bounces(world, dt):
+        for event in world.read_events(keel.CollisionEvent2D):
+            if event.impulse > 100.0:
+                print(f"bounce: impulse={event.impulse:.0f}")
+
+    app.run()
+    ```
+
+    Run it:
+
+    ```bash
+    python main.py
+    ```
+
+    With `tools.debug_draw.set_visible(True)` you will see the collider outlines drawn over the window: green for dynamic bodies, gray for static ones. Press **F3** to toggle the debug draw at runtime.
+
+    Key concepts from this example:
+
+    - `setup_physics_2d` must be called before `keel.dev_tools` for the debug draw to attach automatically.
+    - `keel.BodyType.DYNAMIC` is required for `CollisionEvent2D` to fire. `STATIC` vs `STATIC` and `KINEMATIC` vs `STATIC` do not emit events — only pairings involving at least one `DYNAMIC` body do.
+    - `world.read_events(keel.CollisionEvent2D)` drains the event queue for the current frame. The queue is cleared at the start of every new frame.
+  </Step>
+
+  <Step title="Enable developer tools">
+    The `keel.dev_tools` call registers the profiler, inspector, and (if physics is set up) debug draw in one line. Add it right after your setup calls:
+
+    ```python main.py
+    import keel
+    from keel.renderer import setup_renderer_2d
+
+    app = keel.App(title="My Game", width=800, height=600)
+    setup_renderer_2d(app)
+
+    tools = keel.dev_tools(app)  # F1 inspector, F2 profiler, F3 debug draw
+
+    # ... your components, entities, and systems ...
+
+    app.run()
+    ```
+
+    Once the window is open:
+
+    | Shortcut | Tool | What it shows |
+    |---|---|---|
+    | **F1** | World Inspector | Every archetype and entity with live component field values. Filter by component name. |
+    | **F2** | Frame Profiler | Per-system 60-frame rolling average in milliseconds with a bar chart. |
+    | **F3** | Debug Draw | Collider outlines colored by body type (green = dynamic, gray = static, blue = kinematic). |
+
+    `tools` is a `DevTools` instance. You can access sub-tools directly:
+
+    ```python
+    tools.profiler     # FrameProfiler — call tools.profiler.get_stats() for programmatic access
+    tools.inspector    # WorldInspector
+    tools.debug_draw   # DebugDraw2D, or None if physics was not set up before dev_tools
+    ```
+
+    <Note>
+      The F-key shortcuts use edge-detected polling via `app.input.is_key_down`, checked once per simulation tick. They do not rely on `KeyEvent` from the event bus, so they fire reliably even on visual frames where no simulation tick ran.
+    </Note>
+  </Step>
+
+  <Step title="Run with hot reload">
+    Instead of `python main.py`, use the Keel CLI for a hot-reloading dev loop:
+
+    ```bash
+    keel run
+    ```
+
+    `keel run` watches every `.py` file in the current directory and restarts the process automatically on save. This means you can edit a system, hit save, and see the result in the window within a second — no manual restart needed.
+
+    Other useful CLI commands:
+
+    ```bash
+    keel new mygame     # scaffold a new project
+    keel run            # hot-reload dev server (watches *.py)
+    keel build          # package the project for distribution
     ```
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## What's Next?
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+<CardGroup cols={2}>
+  <Card
+    title="ECS Concepts"
+    icon="layer-group"
+    href="/concepts/ecs"
+  >
+    Deep dive into archetypes, queries, the command buffer, events, and resource injection. Learn when to use `query`, `query_one`, `get`, and `set`.
+  </Card>
+  <Card
+    title="2D Rendering"
+    icon="image"
+    href="/rendering/renderer-2d"
+  >
+    Sprite batching, texture atlases, the orthographic camera, tilemaps, and text rendering with `TextLabel` and the built-in font.
+  </Card>
+  <Card
+    title="Physics (2D)"
+    icon="atom"
+    href="/physics/physics-2d"
+  >
+    Body types, shape types, collision events, raycasts, and the common patterns for balls, paddles, bullets, and players.
+  </Card>
+  <Card
+    title="CLI & Tooling"
+    icon="terminal"
+    href="/tooling/cli"
+  >
+    `keel new`, `keel run`, `keel build`, the world inspector, frame profiler, and debug draw — everything that ships with Keel out of the box.
+  </Card>
+</CardGroup>

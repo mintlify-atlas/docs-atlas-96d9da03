@@ -1,0 +1,379 @@
+---
+title: "3D Rendering with PBR Materials and Lighting"
+sidebarTitle: "3D Renderer"
+description: "Keel's 3D renderer supports OBJ loading, PBR-lite materials, directional and point lights, frustum culling, and Transform3D hierarchy with parent chains."
+---
+
+Keel's 3D renderer runs entirely inside the ECS. You register it with `setup_renderer_3d(app)`, upload meshes and materials to the GPU through the registries it returns, then spawn entities with `Transform3D` and `MeshRenderer` components. Each frame the renderer builds a view-projection matrix, extracts frustum planes for cheap sphere-based culling, uploads per-frame light uniforms, and issues one draw call per visible mesh.
+
+## Setup
+
+```python
+import keel
+from keel.renderer3d import setup_renderer_3d
+
+app = keel.App(title="My 3D Game", width=800, height=600)
+renderer = setup_renderer_3d(app)
+```
+
+`setup_renderer_3d(app)` registers a system at `Phase.RENDER` and returns a `Renderer3DSetup` dataclass:
+
+| Field | Type | Description |
+|---|---|---|
+| `mesh_registry` | `MeshRegistry` | Upload meshes; get back integer mesh IDs. |
+| `material_registry` | `MaterialRegistry` | Register PBR-lite materials; get back integer material IDs. |
+| `renderer3d` | `Renderer3D` | The renderer instance (holds culling stats, draw-call counts). |
+| `shader_cache` | `ShaderCache3D` | The compiled PBR-lite shader. |
+| `render_system` | `Callable` | The registered render function (for reference). |
+
+The call is idempotent — calling it a second time returns the existing setup.
+
+<Note>
+If both `setup_renderer_2d` and `setup_renderer_3d` are active in the same app, the 3D renderer skips its own framebuffer clear and lets the 2D system's clear serve as the shared clear. Depth testing is enabled for the 3D mesh pass and disabled on exit, so 2D sprites and text overlays that follow see no depth state.
+</Note>
+
+## Meshes
+
+### Registering a Mesh
+
+Upload a `Mesh` to the GPU and receive an integer mesh ID:
+
+```python
+from keel.renderer3d import make_cube, make_sphere, make_plane
+
+mesh_registry = renderer.mesh_registry
+
+cube_id   = mesh_registry.add(make_cube())
+sphere_id = mesh_registry.add(make_sphere(subdivisions=2))
+plane_id  = mesh_registry.add(make_plane())
+```
+
+`MeshRegistry.add(mesh)` uploads vertex and index buffers to a `MeshBuffer` (VBO + EBO) and binds it against the PBR shader. The returned integer is stable for the lifetime of the app.
+
+### Built-in Primitives
+
+<CardGroup cols={3}>
+  <Card title="make_cube()" icon="cube">
+    Unit cube centred at the origin. 24 vertices, 36 indices, per-face flat normals.
+  </Card>
+  <Card title="make_sphere(subdivisions=N)" icon="circle">
+    UV sphere of radius 0.5. Higher `subdivisions` values produce smoother geometry. `subdivisions=1` is coarse; `subdivisions=4` is smooth.
+  </Card>
+  <Card title="make_plane(width, depth)" icon="square">
+    Y-up flat quad on the XZ plane. Normal points +Y. `width` and `depth` default to `1.0`.
+  </Card>
+</CardGroup>
+
+### Loading OBJ Files
+
+```python
+from keel.renderer3d import OBJLoader
+
+mesh = OBJLoader.load("assets/models/ship.obj")
+ship_id = mesh_registry.add(mesh)
+```
+
+The OBJ loader supports `v`, `vn`, `vt`, and `f` lines. N-gon faces are triangulated via fan decomposition. When normals are absent from the file, the loader generates per-triangle flat normals from the cross product of the face edges. Material (`mtllib`, `usemtl`), group (`g`, `o`), and smoothing (`s`) directives are intentionally ignored.
+
+The CPU-side `Mesh` format is an `(N, 8) float32` vertex array (position `xyz`, normal `xyz`, UV `xy`) plus a `(M,) uint32` index array in triangle-list order.
+
+## Materials
+
+Keel's v1 material model is PBR-lite: scalar fields only, no texture maps.
+
+### The Material Dataclass
+
+```python
+from keel.renderer3d import Material
+
+material = Material(
+    albedo_r=0.8,    # base colour R
+    albedo_g=0.8,    # base colour G
+    albedo_b=0.8,    # base colour B
+    roughness=0.5,   # 0.0 = mirror, 1.0 = fully diffuse
+    metallic=0.0,    # 0.0 = dielectric, 1.0 = conductor
+    emissive_r=0.0,  # self-emission R
+    emissive_g=0.0,  # self-emission G
+    emissive_b=0.0,  # self-emission B
+)
+```
+
+### Registering a Material
+
+```python
+material_registry = renderer.material_registry
+
+# Matte red surface.
+red_mat_id = material_registry.add(Material(
+    albedo_r=0.9, albedo_g=0.2, albedo_b=0.2,
+    roughness=0.8,
+))
+
+# Emissive yellow lamp — glows independently of lights.
+lamp_mat_id = material_registry.add(Material(
+    albedo_r=1.0, albedo_g=0.9, albedo_b=0.5,
+    emissive_r=1.0, emissive_g=0.85, emissive_b=0.4,
+))
+```
+
+`material_registry.add(material)` returns a stable integer material ID. Material ID `0` is always a pre-allocated default mid-gray surface — `MeshRenderer(material_id=0)` is always safe to use without registering a material first.
+
+## The MeshRenderer Component
+
+```python
+@keel.component
+class MeshRenderer:
+    mesh_id: int = 0
+    material_id: int = 0
+    cast_shadows: bool = True
+    receive_shadows: bool = True
+    visible: bool = True
+```
+
+Spawn it alongside a `Transform3D` to place a mesh in the world:
+
+```python
+app.world.spawn(
+    keel.Transform3D(x=0.0, y=0.0, z=0.0),
+    keel.MeshRenderer(mesh_id=cube_id, material_id=red_mat_id),
+)
+```
+
+Setting `visible=False` on a `MeshRenderer` skips the draw call for that entity without removing it from the world. Use `world.set(entity_id, keel.MeshRenderer, visible=False)` to toggle at runtime.
+
+## Lights
+
+### Directional Light
+
+A sun-like light with a world-space direction and no falloff. The renderer reads the first `DirectionalLight` in the world and ignores any extras.
+
+```python
+@keel.component
+class DirectionalLight:
+    dir_x: float = -0.577  # light travel direction X (will be normalized)
+    dir_y: float = -0.577  # light travel direction Y
+    dir_z: float = -0.577  # light travel direction Z
+    r: float = 1.0         # colour R
+    g: float = 1.0         # colour G
+    b: float = 1.0         # colour B
+    intensity: float = 1.0
+```
+
+```python
+# A warm sun pointing diagonally down and to the left.
+app.world.spawn(keel.DirectionalLight(
+    dir_x=-0.4, dir_y=-0.7, dir_z=-0.5,
+    r=0.95, g=0.95, b=0.85,
+    intensity=0.6,
+))
+```
+
+`DirectionalLight` does not need a `Transform3D` — direction is stored directly on the component.
+
+### Point Lights
+
+Point lights illuminate nearby geometry with a distance-based falloff controlled by `radius`. Their position is read from a co-located `Transform3D` on the same entity.
+
+```python
+@keel.component
+class PointLight:
+    r: float = 1.0
+    g: float = 1.0
+    b: float = 1.0
+    intensity: float = 1.0
+    radius: float = 10.0   # influence radius in world units
+```
+
+```python
+# Spawn a warm point light — position comes from Transform3D.
+app.world.spawn(
+    keel.Transform3D(x=2.0, y=1.5, z=0.0),
+    keel.PointLight(r=1.0, g=0.85, b=0.4, intensity=3.0, radius=8.0),
+)
+```
+
+<Warning>
+The renderer supports at most **8 point lights** per frame. When more than 8 are present, the 8 nearest to the camera (by Euclidean distance) are selected and the rest are silently dropped. Plan your scene lighting budget accordingly.
+</Warning>
+
+### Ambient Light
+
+Ambient light is a world resource, not a component. Insert it once to override the default `(0.1, 0.1, 0.1)` ambient term:
+
+```python
+from keel.renderer3d import AmbientLight
+
+app.world.insert_resource(AmbientLight(r=0.15, g=0.15, b=0.2))
+```
+
+## Frustum Culling
+
+The renderer uses Gribb/Hartmann plane extraction from the view-projection matrix to build six frustum planes each frame. Before issuing a draw call for an entity, it tests a bounding sphere centred on the entity's `Transform3D` position against all six planes. Entities whose sphere is fully outside any plane are culled — their draw call is skipped entirely.
+
+The bounding sphere radius defaults to `2.0` world units. For very large or very small meshes this may produce conservative culling results (false negatives — meshes culled when they should be visible). A per-mesh bounding radius API is planned for v0.2.
+
+## Transform3D Hierarchy
+
+`Transform3D` supports parent-child chains. Set a parent entity ID on a child transform to make it inherit its parent's world matrix:
+
+```python
+parent_entity = app.world.spawn(keel.Transform3D(x=5.0, y=0.0, z=0.0))
+child_entity  = app.world.spawn(
+    keel.Transform3D(x=1.0, y=0.0, z=0.0, parent=parent_entity),
+    keel.MeshRenderer(mesh_id=sphere_id, material_id=mat_id),
+)
+```
+
+The renderer resolves the full world matrix for each entity by walking the parent chain at draw time. Cycles in the hierarchy are detected and broken to prevent infinite loops.
+
+## Full Example
+
+The example below is `cube_demo.py`. A red-orange cube spins on two axes; an emissive lamp sphere orbits it and casts coloured point-light illumination.
+
+```python
+"""cube_demo.py — a lit, spinning cube under a sun and an orbiting point light."""
+
+import math
+import keel
+from keel.renderer3d import Material, make_cube, make_sphere, setup_renderer_3d
+
+WIDTH, HEIGHT = 800, 600
+CAMERA_X, CAMERA_Y, CAMERA_Z = 3.0, 3.0, 5.0
+CUBE_SPIN_YAW   = 0.6   # radians / second
+CUBE_SPIN_PITCH = 0.3
+LAMP_ORBIT_RADIUS = 2.5
+LAMP_HEIGHT       = 1.5
+LAMP_SCALE        = 0.15
+SUN_DIR           = (-0.4, -0.7, -0.5)
+
+# ---------------------------------------------------------------------------
+# Custom marker components
+# ---------------------------------------------------------------------------
+
+@keel.component
+class SpinningCube:
+    pass
+
+@keel.component
+class OrbitingLamp:
+    pass
+
+# ---------------------------------------------------------------------------
+# App + renderer
+# ---------------------------------------------------------------------------
+
+app = keel.App(title="Cube Demo", width=WIDTH, height=HEIGHT)
+renderer = setup_renderer_3d(app)
+
+mesh_registry     = renderer.mesh_registry
+material_registry = renderer.material_registry
+
+cube_mesh   = mesh_registry.add(make_cube())
+sphere_mesh = mesh_registry.add(make_sphere(subdivisions=2))
+
+cube_material = material_registry.add(Material(
+    albedo_r=0.85, albedo_g=0.40, albedo_b=0.30,
+    roughness=0.4,
+))
+lamp_material = material_registry.add(Material(
+    albedo_r=1.0, albedo_g=0.9, albedo_b=0.5,
+    roughness=0.2,
+    emissive_r=1.0, emissive_g=0.85, emissive_b=0.4,
+))
+
+# ---------------------------------------------------------------------------
+# Point-at-origin helper
+# ---------------------------------------------------------------------------
+
+def _look_at_origin(x, y, z):
+    """Return (yaw, pitch) for a Camera3D at (x, y, z) aimed at the origin."""
+    yaw   = math.atan2(x, z)
+    pitch = -math.atan2(y, math.sqrt(x * x + z * z))
+    return yaw, pitch
+
+# ---------------------------------------------------------------------------
+# Spawn entities
+# ---------------------------------------------------------------------------
+
+cam_yaw, cam_pitch = _look_at_origin(CAMERA_X, CAMERA_Y, CAMERA_Z)
+app.world.spawn(keel.Camera3D(
+    x=CAMERA_X, y=CAMERA_Y, z=CAMERA_Z,
+    yaw=cam_yaw, pitch=cam_pitch,
+    fov=math.radians(60.0),
+    near=0.1, far=100.0,
+))
+
+app.world.spawn(
+    keel.Transform3D(),
+    keel.MeshRenderer(mesh_id=cube_mesh, material_id=cube_material),
+    SpinningCube(),
+)
+
+app.world.spawn(
+    keel.Transform3D(scale_x=LAMP_SCALE, scale_y=LAMP_SCALE, scale_z=LAMP_SCALE),
+    keel.MeshRenderer(mesh_id=sphere_mesh, material_id=lamp_material),
+    keel.PointLight(r=1.0, g=0.85, b=0.4, intensity=3.0, radius=8.0),
+    OrbitingLamp(),
+)
+
+app.world.spawn(keel.DirectionalLight(
+    dir_x=SUN_DIR[0], dir_y=SUN_DIR[1], dir_z=SUN_DIR[2],
+    r=0.95, g=0.95, b=0.85,
+    intensity=0.6,
+))
+app.world.flush()
+
+# ---------------------------------------------------------------------------
+# Systems
+# ---------------------------------------------------------------------------
+
+_t = 0.0
+
+@app.system(keel.Phase.UPDATE)
+def quit_on_escape(world, dt):
+    if app.input.is_key_down(keel.KEY_ESCAPE):
+        app.window.close()
+
+@app.system(keel.Phase.UPDATE)
+def spin_cubes(world, dt):
+    for transforms, _ in world.query(keel.Transform3D, SpinningCube):
+        for i in range(len(transforms)):
+            transforms["rot_y"][i] += dt * CUBE_SPIN_YAW
+            transforms["rot_x"][i] += dt * CUBE_SPIN_PITCH
+
+@app.system(keel.Phase.UPDATE)
+def orbit_lamp(world, dt):
+    global _t
+    _t += dt
+    cx = math.cos(_t) * LAMP_ORBIT_RADIUS
+    cz = math.sin(_t) * LAMP_ORBIT_RADIUS
+    for transforms, _ in world.query(keel.Transform3D, OrbitingLamp):
+        for i in range(len(transforms)):
+            transforms["x"][i] = cx
+            transforms["y"][i] = LAMP_HEIGHT
+            transforms["z"][i] = cz
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+app.run()
+```
+
+<Steps>
+  <Step title="Call setup_renderer_3d(app)">
+    This wires the PBR-lite shader, creates mesh and material registries, and registers the Phase.RENDER system.
+  </Step>
+  <Step title="Upload meshes and materials">
+    Use `mesh_registry.add(make_cube())` (or `OBJLoader.load(path)`) and `material_registry.add(Material(...))` to get stable integer IDs.
+  </Step>
+  <Step title="Spawn Transform3D + MeshRenderer entities">
+    Pair the two components so the renderer can locate each entity in space and look up its geometry and shading parameters.
+  </Step>
+  <Step title="Add lights">
+    Spawn at least one `DirectionalLight` entity. Add `PointLight` entities (with a co-located `Transform3D`) for local illumination — up to 8 are active per frame.
+  </Step>
+  <Step title="Spawn a Camera3D">
+    Without a `Camera3D` entity the renderer falls back to a default camera at the origin. Spawn one explicitly to control the view.
+  </Step>
+</Steps>

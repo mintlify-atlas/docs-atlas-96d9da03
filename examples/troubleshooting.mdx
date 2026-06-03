@@ -1,0 +1,286 @@
+---
+title: "Troubleshooting Common Keel Issues"
+sidebarTitle: "Troubleshooting"
+description: "Solutions to the most common Keel problems: CollisionEvent2D not firing, score not updating, ball tunneling through walls, and text not visible on screen."
+---
+
+The issues below account for the majority of questions from developers new to Keel. Each one has a single, well-defined root cause; once you know it, the fix is mechanical. If your problem isn't listed here, the world inspector (F1) and the physics debug draw (F3) are the fastest first steps for diagnosis.
+
+<AccordionGroup>
+
+<Accordion title="CollisionEvent2D never fires">
+
+This is the single most common Keel bug. The cause is almost always **body type**, not a code ordering issue or a missing setup call.
+
+**The rule**
+
+`CollisionEvent2D` fires only when at least one body in the pair is `DYNAMIC`. The full matrix:
+
+| Pair | Events? |
+|------|---------|
+| `DYNAMIC` vs `DYNAMIC` | ✅ Yes |
+| `DYNAMIC` vs `STATIC` | ✅ Yes |
+| `DYNAMIC` vs `KINEMATIC` | ✅ Yes |
+| `DYNAMIC` vs sensor | ✅ Yes (contact-begin frame only) |
+| `KINEMATIC` vs `KINEMATIC` | ❌ No |
+| `KINEMATIC` vs `STATIC` | ❌ No |
+| `STATIC` vs `STATIC` | ❌ No |
+
+This is pymunk behavior, not a Keel bug. Keel emits a one-time `UserWarning` the first time a `KINEMATIC`/`KINEMATIC` or `KINEMATIC`/`STATIC` pair is created to surface the trap early.
+
+**The fix**
+
+Use `keel.BodyType.DYNAMIC` for any entity that needs to participate in collision events: bullets, balls, enemies, projectiles, and players (unless you are handling their movement entirely without physics response, in which case you still need DYNAMIC if you want `CollisionEvent2D` to fire on contact).
+
+```python
+# ✅ Ball: DYNAMIC — generates CollisionEvent2D on every paddle/wall hit.
+ball = app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.RigidBody2D(mass=1.0, body_type=keel.BodyType.DYNAMIC),
+    keel.Collider2D(shape_type=keel.ShapeType2D.CIRCLE, radius=8.0, elasticity=1.0),
+)
+
+# ✅ Paddle: KINEMATIC — moved by your code, pushes the ball aside,
+#    still generates CollisionEvent2D because the ball is DYNAMIC.
+paddle = app.world.spawn(
+    keel.Transform2D(x=40.0, y=300.0),
+    keel.RigidBody2D(body_type=keel.BodyType.KINEMATIC),
+    keel.Collider2D(shape_type=keel.ShapeType2D.BOX,
+                    width=15.0, height=80.0, elasticity=1.0),
+)
+
+# ✅ Wall: STATIC — immovable, still generates events because the ball is DYNAMIC.
+wall = app.world.spawn(
+    keel.Transform2D(x=400.0, y=595.0),
+    keel.RigidBody2D(body_type=keel.BodyType.STATIC),
+    keel.Collider2D(shape_type=keel.ShapeType2D.BOX,
+                    width=800.0, height=10.0, elasticity=1.0),
+)
+```
+
+**Quick diagnostic**
+
+Open the debug draw with F3. Green outlines are `DYNAMIC`, gray are `STATIC`, blue are `KINEMATIC`. If the two bodies you expect to collide are both blue or both gray, that explains the missing events — change at least one to green (`DYNAMIC`).
+
+<Warning>
+A `KINEMATIC` player body touching a `STATIC` floor will **not** emit `CollisionEvent2D`. Ground detection from events does not work in a KINEMATIC/STATIC setup. Use `DYNAMIC` for the player and let pymunk handle gravity, or poll the player's position manually each frame.
+</Warning>
+
+</Accordion>
+
+<Accordion title="Score or game state not updating">
+
+**Symptom A — score reads as a numpy type, not a Python int**
+
+`world.query()` returns numpy array *views*, not Python scalars. Iterating `world.query(GameState)` gives you structured numpy columns:
+
+```python
+# ❌ This returns numpy.int64, not int. Comparisons and f-strings work,
+#    but isinstance(val, int) is False, and some APIs reject it.
+for gs in world.query(GameState):
+    score = gs['score']          # numpy.int64
+    print(type(score))           # <class 'numpy.int64'>
+```
+
+For singleton components, use `world.query_one` instead. It converts every field to a plain Python scalar:
+
+```python
+# ✅ Returns plain Python int, bool, float.
+gs = world.query_one(GameState)
+if gs is not None:
+    score = gs['score']          # int
+    over  = gs['game_over']      # bool — works directly in `if`
+    print(type(score))           # <class 'int'>
+```
+
+**Symptom B — writing to the `query_one` result has no effect**
+
+`query_one` returns a **snapshot dict**. Mutating it does not write back to the ECS:
+
+```python
+# ❌ The ECS is unchanged. `gs` is a copy, not a view.
+gs = world.query_one(GameState)
+gs['score'] = 42   # modifies the local dict only
+```
+
+To write back, call `world.set` with the entity id you saved at spawn time:
+
+```python
+# ✅ Writes through to the component's numpy column.
+world.set(gs_entity, GameState, score=42)
+```
+
+**Symptom C — bulk mutation with `world.query` updates the wrong rows**
+
+If you are iterating the raw query (e.g., to update all entities of a type at once), mutations must index into the column. Assigning to the slice replaces the entire column reference in the local variable without writing through:
+
+```python
+# ❌ gs['score'] is already a view of the column.
+#    `gs['score'] += 1` rebinds the local name, does NOT write through.
+for gs in world.query(GameState):
+    gs['score'] += 1   # no effect on the ECS
+
+# ✅ Index into the first (and only) row explicitly.
+for gs in world.query(GameState):
+    gs['score'][0] += 1   # writes through to the underlying array
+```
+
+<Tip>
+For singleton components, prefer `world.query_one` for reads and `world.set` for writes. Reserve raw `world.query` iteration for bulk operations across many entities of the same component type.
+</Tip>
+
+</Accordion>
+
+<Accordion title="Ball passes through walls at high speed">
+
+**What is happening**
+
+This is *tunneling*: the ball moves more than its own diameter in a single physics tick, so pymunk's collision check never sees an overlapping state. The probe in Keel's test suite shows clean reflective bouncing at 100 px/s but tunneling that bypasses walls past roughly 1500 px/s on a 60 Hz step.
+
+At 60 Hz, `FIXED_DT ≈ 0.0167 s`. A ball moving at 1500 px/s travels **25 pixels per tick**. A wall with a 10-pixel thickness is thinner than one tick of movement — the ball jumps from one side to the other with no overlap frame in between.
+
+**Workarounds in order of effort**
+
+1. **Reduce ball speed.** If 1500 px/s is the limit and your game feels fine at 900 px/s, the simplest fix is a speed cap.
+
+2. **Reduce `FIXED_DT`.** A smaller fixed timestep gives pymunk more opportunities to catch fast-moving bodies, at the cost of more physics steps per visual frame.
+
+   ```python
+   # Default is 1/60. Halving it doubles physics steps per frame.
+   import keel.loop
+   keel.loop.FIXED_DT = 1.0 / 120.0
+   ```
+
+   <Warning>
+   Reducing `FIXED_DT` increases CPU usage proportionally. Profile with F2 before shipping this change.
+   </Warning>
+
+3. **Use manual ball physics.** Take ownership of the ball's position in a `PRE_UPDATE` system, apply your own boundary reflections, and push the result into pymunk each tick with `phys.set_position` and `phys.set_velocity`. pymunk still generates `CollisionEvent2D` for paddle contact detection; you handle the wall bounces yourself.
+
+   ```python
+   BALL_VEL = {'x': 400.0, 'y': 300.0}
+   BALL_POS = {'x': 400.0, 'y': 300.0}
+   BALL_RADIUS = 8.0
+
+   @app.system(keel.Phase.PRE_UPDATE)
+   def move_ball(world, dt):
+       BALL_POS['x'] += BALL_VEL['x'] * dt
+       BALL_POS['y'] += BALL_VEL['y'] * dt
+
+       # Reflect off left/right walls manually — no tunneling possible.
+       if BALL_POS['x'] < BALL_RADIUS:
+           BALL_POS['x'] = BALL_RADIUS
+           BALL_VEL['x'] = abs(BALL_VEL['x'])
+       elif BALL_POS['x'] > WIDTH - BALL_RADIUS:
+           BALL_POS['x'] = WIDTH - BALL_RADIUS
+           BALL_VEL['x'] = -abs(BALL_VEL['x'])
+
+       # Tell pymunk where the ball is so CollisionEvent2D fires for paddles.
+       phys.set_position(ball_entity, BALL_POS['x'], BALL_POS['y'])
+       phys.set_velocity(ball_entity, BALL_VEL['x'], BALL_VEL['y'])
+   ```
+
+   See the [Common Patterns](/examples/common-patterns) page for the full write-up of this approach.
+
+</Accordion>
+
+<Accordion title="Text not visible on screen">
+
+**The coordinate system**
+
+Keel's text renderer draws in screen space, not world space. **`y=0` is the top of the screen**, and the y axis grows downward. This is the opposite of the OpenGL world-space convention used by `Transform2D` on sprites.
+
+**The baseline trap**
+
+The `Transform2D` position attached to a `TextLabel` is the **text baseline** — the bottom of most uppercase letters, below the tops of ascenders like `d`, `h`, `l`. If you place a label at `y=0`, the glyphs draw upward into negative y and clip outside the viewport. Nothing appears on screen.
+
+```python
+# ❌ y=0 places the baseline at the very top edge.
+#    The glyphs render above the screen and clip.
+score_label = app.world.spawn(
+    keel.Transform2D(x=10.0, y=0.0),
+    keel.TextLabel(font_id=FONT_ID),
+)
+```
+
+**The fix**
+
+Add at least the font's point size in pixels to the y position so the baseline sits below the top of the screen:
+
+```python
+FONT_SIZE_PX = 28
+
+# ✅ y = font size keeps the first row of glyphs on screen.
+score_label = app.world.spawn(
+    keel.Transform2D(x=10.0, y=float(FONT_SIZE_PX) + 7.0),
+    keel.TextLabel(font_id=FONT_ID, r=1.0, g=1.0, b=1.0),
+)
+```
+
+The Asteroids example uses `SCORE_LABEL_Y = 35.0` for a 28-pixel font — roughly `font_size + 7` — which places the score just inside the top edge with a comfortable margin.
+
+**Other invisible-text causes**
+
+| Cause | Symptom | Fix |
+|-------|---------|-----|
+| `TextLabel(visible=False)` | Label exists but is hidden | Call `set_label_visible(world, label_id, True)` |
+| `set_text` never called | Entity spawned, no text content | Call `set_text(label_id, "your text")` |
+| Color is `r=0, g=0, b=0` (black) on a black background | Text draws but is invisible | Set at least one color channel above 0 |
+| `setup_text(app)` not called before spawning `TextLabel` | Text renderer not initialized | Call `setup_text(app)` before spawning text entities |
+
+<Tip>
+Use the world inspector (F1) to verify that your `TextLabel` entity exists and that its `visible` field is `True`. Then check the `Transform2D` y value. Those two checks resolve the majority of invisible-text reports.
+</Tip>
+
+</Accordion>
+
+<Accordion title="`import keel` fails with module not found">
+
+The PyPI distribution name and the Python import name are different:
+
+| | Name |
+|--|------|
+| PyPI (install) | `keelpy` |
+| Python (import) | `keel` |
+
+**Install from PyPI**
+
+```bash
+pip install keelpy
+```
+
+Then in your code:
+
+```python
+import keel  # correct — not `import keelpy`
+```
+
+**Install from source**
+
+If you cloned the repository, install it as an editable package from the repo root:
+
+```bash
+git clone https://github.com/VKSFY/keel
+cd keel
+pip install -e .
+```
+
+**Check for a shadowing file**
+
+If `pip install keelpy` succeeds but `import keel` still raises `ModuleNotFoundError`, a file named `keel.py` somewhere on your `PYTHONPATH` is shadowing the installed package. Python resolves `import keel` to the first match on `sys.path`, so a stray `keel.py` in your project directory or working directory wins over the site-packages installation.
+
+```bash
+# Find any shadowing keel.py files:
+python -c "import sys; print(sys.path)"
+# Then check each directory for a keel.py or keel/ folder that isn't the installed package.
+```
+
+Rename or remove the conflicting file, then retry the import.
+
+<Warning>
+Do not name your own game files `keel.py`. Python will import your file instead of the engine package, and the resulting `AttributeError` messages will not mention the naming conflict.
+</Warning>
+
+</Accordion>
+
+</AccordionGroup>

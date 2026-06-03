@@ -1,0 +1,351 @@
+---
+title: "3D Physics with pybullet: Rigid Bodies in 3D Space"
+sidebarTitle: "Physics 3D"
+description: "Keel's 3D physics bridges pybullet in DIRECT mode. Install the physics3d extra, call setup_physics_3d, and spawn RigidBody3D and Collider3D entities."
+---
+
+Keel's 3D physics layer bridges [pybullet](https://pybullet.org/) using the same ECS-first pattern as the 2D bridge: describe bodies and shapes as components, and the bridge keeps pybullet in sync automatically every frame. The simulation always runs in `DIRECT` (headless) mode — GUI mode is never used. pybullet reads `Transform3D` on the way in and writes position, rotation, and velocity back on the way out.
+
+## Installation
+
+pybullet is an optional dependency. Install the `physics3d` extra:
+
+```bash
+pip install keelpy[physics3d]
+```
+
+<Warning>
+  pybullet wheels are currently only available on **Windows** for recent Python versions. macOS and Linux users must build pybullet from source or wait for cross-platform wheels to appear on PyPI. `import keel` and `import keel.physics` still succeed on those platforms — the import error is deferred until `setup_physics_3d` is called.
+</Warning>
+
+Calling `setup_physics_3d` without pybullet installed raises a clear `ImportError`:
+
+```
+3D physics requires pybullet. Install it with: pip install keelpy[physics3d]
+```
+
+## Setting up physics
+
+Call `setup_physics_3d` once, immediately after creating your `App`. It registers a `physics_3d_system` at `Phase.POST_UPDATE` and returns the `Physics3D` bridge object:
+
+```python
+import keel
+from keel.physics import setup_physics_3d
+
+app = keel.App(title="My 3D Game", width=1280, height=720)
+phys = setup_physics_3d(app, gravity_y=-9.81)
+```
+
+`setup_physics_3d` is idempotent — a second call returns the existing bridge. The function signature is:
+
+```python
+setup_physics_3d(app, gravity_y=-9.81) -> Physics3D
+```
+
+The bridge internally creates the pybullet client with `gravity_x=0.0` and `gravity_z=0.0`; only `gravity_y` is exposed through `setup_physics_3d`.
+
+<Note>
+  `gravity_y=-9.81` is in meters per second squared, matching pybullet's metric default. Scale your scene accordingly — pybullet works best with objects in the 0.1 – 10 m range.
+</Note>
+
+## Components
+
+Every 3D physics entity requires three components: `Transform3D` for position and rotation, `RigidBody3D` for mass and velocity, and `Collider3D` for shape. Missing `RigidBody3D` or `Collider3D` emits a one-time `RuntimeWarning` and skips the entity.
+
+### RigidBody3D
+
+```python
+@keel.component
+class RigidBody3D:
+    mass: float = 1.0
+    vel_x: float = 0.0
+    vel_y: float = 0.0
+    vel_z: float = 0.0
+    ang_vel_x: float = 0.0
+    ang_vel_y: float = 0.0
+    ang_vel_z: float = 0.0
+    damping: float = 0.0
+    ang_damping: float = 0.0
+    body_type: int = 0       # use keel.BodyType enum
+```
+
+Set `body_type` with the `keel.BodyType` enum:
+
+```python
+keel.RigidBody3D(mass=1.0, body_type=keel.BodyType.DYNAMIC)
+keel.RigidBody3D(body_type=keel.BodyType.STATIC)
+keel.RigidBody3D(body_type=keel.BodyType.KINEMATIC)
+```
+
+`damping` and `ang_damping` map to pybullet's `linearDamping` and `angularDamping` respectively, applied via `changeDynamics` when the body is created.
+
+### Collider3D
+
+```python
+@keel.component
+class Collider3D:
+    shape_type: int = 0      # use keel.ShapeType3D enum
+    size_x: float = 1.0
+    size_y: float = 1.0
+    size_z: float = 1.0
+    radius: float = 0.5
+    friction: float = 0.5
+    restitution: float = 0.3
+    mesh_id: int = 0
+```
+
+`shape_type` selects which size fields the bridge reads:
+
+<CardGroup cols={2}>
+  <Card title="SPHERE" icon="circle">
+    Uses `radius`. Best for balls and round projectiles.
+
+    ```python
+    keel.Collider3D(
+        shape_type=keel.ShapeType3D.SPHERE,
+        radius=0.5,
+    )
+    ```
+  </Card>
+  <Card title="BOX" icon="cube">
+    Uses `size_x`, `size_y`, `size_z` as **half-extents**. Good for crates and platforms.
+
+    ```python
+    keel.Collider3D(
+        shape_type=keel.ShapeType3D.BOX,
+        size_x=1.0,
+        size_y=1.0,
+        size_z=1.0,
+    )
+    ```
+  </Card>
+  <Card title="CAPSULE" icon="pill">
+    Uses `size_x` as radius and `size_y` as height. Good for character controllers.
+
+    ```python
+    keel.Collider3D(
+        shape_type=keel.ShapeType3D.CAPSULE,
+        size_x=0.5,   # radius
+        size_y=1.5,   # height
+    )
+    ```
+  </Card>
+  <Card title="MESH" icon="layer-group">
+    Intends to use `mesh_id`, but is **not yet implemented** — falls back to a sphere shape with `radius`, and emits a `RuntimeWarning`.
+
+    ```python
+    keel.Collider3D(
+        shape_type=keel.ShapeType3D.MESH,
+        radius=0.5,   # fallback radius
+    )
+    ```
+  </Card>
+</CardGroup>
+
+<Note>
+  `ShapeType3D.BOX` half-extents in pybullet differ from `ShapeType2D.BOX` in pymunk, which uses full width/height. A `size_x=1.0` 3D box is 2 units wide total.
+</Note>
+
+## Spawning physics entities
+
+```python
+# Static ground plane.
+app.world.spawn(
+    keel.Transform3D(x=0.0, y=0.0, z=0.0),
+    keel.RigidBody3D(body_type=keel.BodyType.STATIC),
+    keel.Collider3D(
+        shape_type=keel.ShapeType3D.BOX,
+        size_x=50.0,
+        size_y=0.1,
+        size_z=50.0,
+        friction=0.8,
+        restitution=0.2,
+    ),
+)
+
+# Dynamic sphere that falls onto the ground.
+app.world.spawn(
+    keel.Transform3D(x=0.0, y=5.0, z=0.0),
+    keel.RigidBody3D(mass=1.0, body_type=keel.BodyType.DYNAMIC),
+    keel.Collider3D(
+        shape_type=keel.ShapeType3D.SPHERE,
+        radius=0.5,
+        restitution=0.6,
+    ),
+)
+```
+
+## Collision events
+
+`CollisionEvent3D` is emitted by the bridge for every contact point pybullet reports in a given step.
+
+```python
+@keel.event
+class CollisionEvent3D:
+    entity_a: int
+    entity_b: int
+    contact_x: float
+    contact_y: float
+    contact_z: float
+    normal_x: float
+    normal_y: float
+    normal_z: float
+```
+
+Read events in any system at or after `Phase.POST_UPDATE`:
+
+```python
+@app.system(keel.Phase.POST_UPDATE)
+def on_collision(world, dt):
+    for event in world.read_events(keel.CollisionEvent3D):
+        print(
+            f"entity {event.entity_a} hit entity {event.entity_b} "
+            f"at ({event.contact_x:.2f}, {event.contact_y:.2f}, {event.contact_z:.2f})"
+        )
+```
+
+Unlike `CollisionEvent2D`, `CollisionEvent3D` does not carry an `impulse` field — it carries the **contact point** and **contact normal** in world space, sourced from pybullet's `getContactPoints`.
+
+<Warning>
+  The same body-type rules apply in 3D as in 2D: `CollisionEvent3D` only fires when at least one body is `DYNAMIC`. See [Body Types](/physics/body-types) for the full collision event matrix.
+</Warning>
+
+## Direct physics controls
+
+The `Physics3D` bridge object exposes the same style of direct-control helpers as the 2D bridge:
+
+```python
+phys = setup_physics_3d(app, gravity_y=-9.81)
+
+# Overwrite a body's linear velocity (mirrors into RigidBody3D).
+phys.set_velocity(entity_id, vx, vy, vz)
+
+# Teleport a body (mirrors into Transform3D).
+phys.set_position(entity_id, x, y, z)
+
+# Apply a one-shot impulse (mass × Δv) at the body's center.
+phys.apply_impulse(entity_id, ix, iy, iz)
+
+# Apply a continuous world-space force (call each frame it should persist).
+phys.apply_force(entity_id, fx, fy, fz)
+```
+
+## Raycasting
+
+`Physics3D.raycast_3d` performs a pybullet `rayTest` and returns hits sorted nearest-first by `fraction` (0.0 = start, 1.0 = end):
+
+```python
+hits = phys.raycast_3d(
+    start=(0.0, 10.0, 0.0),
+    end=(0.0, -10.0, 0.0),
+)
+
+for hit in hits:
+    print(
+        f"entity {hit['entity_id']} at {hit['point']} "
+        f"(fraction={hit['fraction']:.2f}, normal={hit['normal']})"
+    )
+```
+
+Each entry in the returned list is a `dict` with keys: `entity_id`, `point`, `normal`, and `fraction`.
+
+## Integration with Transform3D
+
+The bridge reads and writes `Transform3D` fields every frame:
+
+| Direction | Fields |
+|---|---|
+| **ECS → pybullet** | `x`, `y`, `z`, `rot_x`, `rot_y`, `rot_z` (Euler angles → quaternion) |
+| **pybullet → ECS** | `x`, `y`, `z`, `rot_x`, `rot_y`, `rot_z` (quaternion → Euler), `vel_x`, `vel_y`, `vel_z`, `ang_vel_x`, `ang_vel_y`, `ang_vel_z` |
+
+Static bodies are never written back — they are immovable by design.
+
+Kinematic bodies update their pybullet position and orientation from `Transform3D` each frame, so you drive them by writing `Transform3D` directly (or by calling `phys.set_position`).
+
+## ECS tick order
+
+The bridge runs inside a single `Phase.POST_UPDATE` system in this fixed order:
+
+<Steps>
+  <Step title="sync_to_physics">
+    Reads `Transform3D`, `RigidBody3D`, and `Collider3D` from every matching archetype and creates or updates the corresponding pybullet bodies. Bodies for despawned entities are removed here.
+  </Step>
+  <Step title="step">
+    Calls `pybullet.stepSimulation` one to ten times (clamped substeps based on `dt / (1/240)`), then drains `pybullet.getContactPoints` into the internal collision buffer.
+  </Step>
+  <Step title="sync_from_physics">
+    Writes pybullet body state (position, orientation as Euler, linear velocity, angular velocity) back into `Transform3D` and `RigidBody3D` in place.
+  </Step>
+  <Step title="_emit_collisions">
+    Drains the contact buffer into `world.emit(CollisionEvent3D(...))`.
+  </Step>
+</Steps>
+
+## DIRECT mode only
+
+Keel's pybullet bridge **always** connects with `pybullet.DIRECT`. GUI mode is never used. Each `Physics3D` instance holds its own `physicsClientId`, so multiple instances (in tests, editors, or parallel worlds) never share state.
+
+```python
+# Inspect the underlying client ID if needed for debug.
+print(phys.client_id)    # integer >= 0
+print(phys.connected)    # True while the client is open
+```
+
+The bridge disconnects from pybullet automatically via an App shutdown hook registered by `setup_physics_3d`. You can also call `phys.disconnect()` (or its alias `phys.cleanup()`) manually — both are idempotent.
+
+## Full example: falling sphere
+
+```python
+import keel
+from keel.physics import setup_physics_3d
+
+app = keel.App(title="3D Physics", width=1280, height=720)
+phys = setup_physics_3d(app, gravity_y=-9.81)
+
+# Ground.
+app.world.spawn(
+    keel.Transform3D(x=0.0, y=0.0, z=0.0),
+    keel.RigidBody3D(body_type=keel.BodyType.STATIC),
+    keel.Collider3D(
+        shape_type=keel.ShapeType3D.BOX,
+        size_x=20.0,
+        size_y=0.1,
+        size_z=20.0,
+    ),
+)
+
+# Sphere.
+app.world.spawn(
+    keel.Transform3D(x=0.0, y=5.0, z=0.0),
+    keel.RigidBody3D(mass=1.0, body_type=keel.BodyType.DYNAMIC),
+    keel.Collider3D(
+        shape_type=keel.ShapeType3D.SPHERE,
+        radius=0.5,
+        restitution=0.7,
+    ),
+)
+
+@app.system(keel.Phase.POST_UPDATE)
+def log_contacts(world, dt):
+    for event in world.read_events(keel.CollisionEvent3D):
+        print(
+            f"contact: entities {event.entity_a} and {event.entity_b} "
+            f"at y={event.contact_y:.3f}"
+        )
+
+app.run()
+```
+
+## Troubleshooting
+
+<Accordion title="ImportError: 3D physics requires pybullet">
+  Run `pip install keelpy[physics3d]`. If you are on macOS or Linux and pybullet has no wheel for your Python version, you will need to build it from source or use Windows.
+</Accordion>
+
+<Accordion title="CollisionEvent3D never fires">
+  Ensure at least one of the two bodies is `DYNAMIC`. STATIC vs STATIC and KINEMATIC vs STATIC pairs do not emit events in pybullet. See [Body Types](/physics/body-types).
+</Accordion>
+
+<Accordion title="MESH shape falls back to sphere">
+  `ShapeType3D.MESH` is not yet implemented. The bridge emits a `RuntimeWarning` and creates a sphere using the entity's `radius` field as a fallback.
+</Accordion>

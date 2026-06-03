@@ -1,0 +1,377 @@
+---
+title: "Renderer Module: 2D and 3D Setup Functions"
+sidebarTitle: "Renderer"
+description: "setup_renderer_2d and setup_renderer_3d register render systems and return setup objects. The 2D renderer provides a sprite batcher; the 3D renderer provides mesh and material registries."
+---
+
+Keel ships two independent renderers — a 2D sprite batcher and a 3D PBR-lite mesh renderer — both built on ModernGL. You call a single `setup_*` function; the renderer wires its own `Phase.RENDER` system and returns a setup object with the registries you need to load assets.
+
+Both renderers can be active simultaneously. The 3D renderer detects the presence of `SpriteBatch2D` as a world resource and skips its own framebuffer clear when the 2D renderer has already cleared it, so 2D sprites composit as an overlay on top of 3D geometry.
+
+---
+
+## 2D Renderer
+
+### `setup_renderer_2d`
+
+```python
+def setup_renderer_2d(app: App) -> Renderer2DSetup
+```
+
+Creates the `TextureAtlas`, `SpriteBatch2D`, and sprite shader, inserts them as world resources, and registers a `Phase.RENDER` system that queries `(Transform2D, Sprite)` and draws every sprite with one instanced draw call per texture ID. Idempotent — the second call returns the cached setup object.
+
+**Requires:** `app.ctx` (a `moderngl.Context`) — provided automatically by `keel.App`.
+
+```python
+import keel
+
+app = keel.App(title="My Game", width=800, height=600)
+renderer = keel.setup_renderer_2d(app)
+
+# Load a texture into the atlas
+hero_tex_id = renderer.atlas.load("assets/hero.png")
+
+# Spawn a sprite
+app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0),
+    keel.Sprite(texture_id=hero_tex_id, width=64.0, height=64.0),
+)
+```
+
+### `Renderer2DSetup`
+
+Returned by `setup_renderer_2d`. All fields are already wired as world resources — you rarely need to hold onto this object beyond initial asset loading.
+
+<ParamField path="atlas" type="TextureAtlas">
+  The `TextureAtlas` that owns all GPU textures. Call `atlas.load(path)` to upload an image and receive a stable integer texture ID. Supports up to 16 textures.
+</ParamField>
+
+<ParamField path="shader_cache" type="ShaderCache">
+  Compiled GLSL program cache. Internal; not normally needed by user code.
+</ParamField>
+
+<ParamField path="sprite_batch" type="SpriteBatch2D">
+  The instanced sprite renderer. The `Phase.RENDER` system calls `sprite_batch.render(...)` automatically. Use `batch.last_draw_calls` for profiling.
+</ParamField>
+
+<ParamField path="render_system" type="Callable">
+  The registered render system function. Stored for reference; not normally called directly.
+</ParamField>
+
+### `TextureAtlas`
+
+`TextureAtlas` is an integer-keyed store of up to 16 `moderngl.Texture` objects. It is the bridge between file paths and the `Sprite.texture_id` field.
+
+```python
+# Load from disk (caches by path)
+tex_id = renderer.atlas.load("assets/tiles.png")
+
+# Register a procedurally built texture at a string key
+tex_id = renderer.atlas.add_texture("my_generated_tex", my_moderngl_texture)
+
+# Re-upload the source file (called automatically by the hot-reload system)
+renderer.atlas.reload(tex_id)
+
+# Number of textures currently loaded
+count = renderer.atlas.texture_count()
+```
+
+<Note>
+  `TextureAtlas` is limited to 16 slots — the minimum the OpenGL specification guarantees for fragment shader sampler arrays. Plan your art as sprite sheets or atlases to stay within this limit.
+</Note>
+
+### `Camera2D`
+
+`Camera2D` is an ECS component. Spawn exactly one entity with it; the 2D renderer reads the first `Camera2D` found each frame and builds the orthographic view matrix from its fields. If no `Camera2D` exists, a default centered matrix is used (world origin at bottom-left, pixel-to-world ratio 1:1).
+
+```python
+import keel
+
+app.world.spawn(
+    keel.Camera2D(x=400.0, y=300.0, zoom=1.0, rotation=0.0)
+)
+```
+
+<ParamField path="x" type="float" default="0.0">
+  World-space X coordinate the camera is centered on. The default matrix centers on `(viewport_width / 2, viewport_height / 2)`.
+</ParamField>
+
+<ParamField path="y" type="float" default="0.0">
+  World-space Y coordinate the camera is centered on.
+</ParamField>
+
+<ParamField path="zoom" type="float" default="1.0">
+  Orthographic zoom level. `2.0` halves the visible world area (zooms in). `0.5` doubles it (zooms out).
+</ParamField>
+
+<ParamField path="rotation" type="float" default="0.0">
+  Camera rotation in radians. The view matrix applies the inverse rotation so the world appears to rotate opposite to the camera.
+</ParamField>
+
+### `setup_tilemap`
+
+```python
+def setup_tilemap(app: App, tile_data: np.ndarray, tile_width: int = 32, tile_height: int = 32) -> TilemapSetup
+```
+
+Creates a static chunk-baked tilemap that shares the sprite shader and texture atlas. Tile IDs are a 2D `int32` NumPy array where `0` = empty and `N` maps to `atlas` texture ID `N − 1`. The world is partitioned into 16×16-tile chunks; each chunk bakes one VAO at load time, so the per-frame cost is one draw call per non-empty chunk.
+
+Requires `setup_renderer_2d` to have been called first.
+
+```python
+import numpy as np
+import keel
+
+renderer = keel.setup_renderer_2d(app)
+grass_id = renderer.atlas.load("assets/grass.png") + 1  # tile IDs are 1-based
+stone_id = renderer.atlas.load("assets/stone.png") + 1
+
+tile_data = np.zeros((20, 30), dtype=np.int32)
+tile_data[0, :] = stone_id   # bottom row of stone
+tile_data[1:, :] = grass_id  # everything above is grass
+
+tilemap_setup = keel.setup_tilemap(app, tile_data, tile_width=32, tile_height=32)
+```
+
+<ParamField path="tile_data" type="np.ndarray">
+  2D `int32` array of shape `(rows, cols)`. `0` = empty tile. Values `1..N` map to `TextureAtlas` slot `N − 1`.
+</ParamField>
+
+<ParamField path="tile_width" type="int" default="32">
+  Width of each tile in world pixels.
+</ParamField>
+
+<ParamField path="tile_height" type="int" default="32">
+  Height of each tile in world pixels.
+</ParamField>
+
+Calling `setup_tilemap` again with new `tile_data` re-bakes the chunks without registering a second render system.
+
+---
+
+## 3D Renderer
+
+### `setup_renderer_3d`
+
+```python
+def setup_renderer_3d(app: App) -> Renderer3DSetup
+```
+
+Creates the `MeshRegistry`, `MaterialRegistry`, and PBR-lite shader, inserts them as world resources, and registers a `Phase.RENDER` system that queries `(Transform3D, MeshRenderer)`, frustum-culls entities, resolves parent-chain model matrices, uploads per-frame lighting uniforms, and draws every surviving mesh. Idempotent.
+
+```python
+import keel
+
+app = keel.App(title="3D Demo", width=1280, height=720)
+r3d = keel.setup_renderer_3d(app)
+
+from keel import make_cube, Material
+
+cube_id = r3d.mesh_registry.add(make_cube())
+mat_id = r3d.material_registry.add(
+    Material(albedo_r=0.8, albedo_g=0.3, albedo_b=0.1, roughness=0.6)
+)
+
+app.world.spawn(
+    keel.Transform3D(x=0.0, y=0.0, z=-5.0),
+    keel.MeshRenderer(mesh_id=cube_id, material_id=mat_id),
+)
+```
+
+### `Renderer3DSetup`
+
+<ParamField path="mesh_registry" type="MeshRegistry">
+  Upload `Mesh` objects and receive stable integer IDs used by `MeshRenderer.mesh_id`. Call `mesh_registry.add(mesh)` → returns the `mesh_id` integer.
+</ParamField>
+
+<ParamField path="material_registry" type="MaterialRegistry">
+  Store `Material` objects and receive stable integer IDs used by `MeshRenderer.material_id`. ID `0` is always the default mid-gray material. Call `material_registry.add(material)` → returns the `material_id` integer.
+</ParamField>
+
+<ParamField path="renderer3d" type="Renderer3D">
+  The `Renderer3D` instance that owns the per-frame render loop. Exposes `last_draw_calls`, `last_culled`, and `last_point_lights` for profiling.
+</ParamField>
+
+<ParamField path="shader_cache" type="ShaderCache3D">
+  Compiled 3D GLSL program cache. Internal.
+</ParamField>
+
+<ParamField path="render_system" type="Callable">
+  The registered `Phase.RENDER` system function.
+</ParamField>
+
+### `Camera3D`
+
+`Camera3D` is an ECS component for perspective projection. Spawn exactly one entity carrying it; the 3D renderer reads the first one found each frame and builds a perspective projection matrix plus an Euler-angle view matrix.
+
+```python
+import keel, math
+
+app.world.spawn(
+    keel.Camera3D(
+        x=0.0, y=2.0, z=10.0,
+        pitch=0.0, yaw=0.0, roll=0.0,
+        fov=math.radians(60),
+        near=0.1,
+        far=1000.0,
+    )
+)
+```
+
+<ParamField path="x" type="float" default="0.0">World-space X position of the camera.</ParamField>
+<ParamField path="y" type="float" default="0.0">World-space Y position (up axis).</ParamField>
+<ParamField path="z" type="float" default="0.0">World-space Z position. Positive Z is behind the default look direction.</ParamField>
+<ParamField path="pitch" type="float" default="0.0">Rotation around X (look up/down) in radians. Applied second in YXZ order.</ParamField>
+<ParamField path="yaw" type="float" default="0.0">Rotation around Y (look left/right) in radians. Applied first in YXZ order.</ParamField>
+<ParamField path="roll" type="float" default="0.0">Rotation around Z in radians. Applied third in YXZ order.</ParamField>
+<ParamField path="fov" type="float" default="1.0472">Vertical field of view in radians. Default ≈ 60°. Must be in `(0, π)`.</ParamField>
+<ParamField path="near" type="float" default="0.1">Near clip plane distance. Must be `> 0`.</ParamField>
+<ParamField path="far" type="float" default="1000.0">Far clip plane distance. Must be `> near`.</ParamField>
+
+---
+
+## Mesh Primitives
+
+The `keel.renderer3d` module ships three procedural mesh generators. All return a `Mesh` dataclass with `vertices` (shape `(N, 8)` float32 — position.xyz + normal.xyz + uv.xy) and `indices` (uint32 triangle list).
+
+### `make_cube()`
+
+```python
+from keel import make_cube
+
+mesh = make_cube()                    # unit cube, 24 verts, 36 indices
+cube_id = r3d.mesh_registry.add(mesh)
+```
+
+Unit cube (−0.5 to +0.5 on each axis) with per-face flat normals. 24 unique vertices and 36 indices.
+
+### `make_sphere(subdivisions)`
+
+```python
+from keel import make_sphere
+
+mesh = make_sphere(subdivisions=2)    # radius 0.5 UV sphere
+sphere_id = r3d.mesh_registry.add(mesh)
+```
+
+UV sphere of radius 0.5. `subdivisions` scales the horizontal and vertical segment counts: `1` → coarse (8 × 6 segments), `4` → smoother (20 × 10 segments).
+
+<ParamField path="subdivisions" type="int" default="2">
+  Positive integer. Increases `h_segments = 4 * sub + 4` and `v_segments = 2 * sub + 2`. Higher values produce smoother geometry at the cost of more vertices.
+</ParamField>
+
+### `make_plane(width, depth)`
+
+```python
+from keel import make_plane
+
+mesh = make_plane(width=10.0, depth=10.0)
+plane_id = r3d.mesh_registry.add(mesh)
+```
+
+Y-up plane on the XZ axes with `normal = +Y`. Four vertices, six indices. Use as a floor or ground.
+
+<ParamField path="width" type="float" default="1.0">Total width along X (half-extent = `width / 2`).</ParamField>
+<ParamField path="depth" type="float" default="1.0">Total depth along Z (half-extent = `depth / 2`).</ParamField>
+
+### `OBJLoader`
+
+```python
+from keel.renderer3d import OBJLoader
+
+mesh = OBJLoader.load("assets/character.obj")
+mesh_id = r3d.mesh_registry.add(mesh)
+```
+
+Minimal OBJ parser supporting `v`, `vn`, `vt`, and `f` directives. Triangulates n-gon faces via fan decomposition. Generates flat normals automatically when the OBJ file omits `vn` lines. Ignores `mtllib`, `usemtl`, `g`, `o`, `s`, and comment lines.
+
+---
+
+## Material
+
+`Material` is a plain Python dataclass carrying PBR-lite shading parameters. No texture maps in v0.1 — only scalar albedo, roughness, metallic, and emissive values.
+
+```python
+from keel import Material
+
+mat_id = r3d.material_registry.add(
+    Material(
+        albedo_r=0.9, albedo_g=0.9, albedo_b=0.9,
+        roughness=0.4,
+        metallic=0.8,
+        emissive_r=0.0, emissive_g=0.0, emissive_b=0.0,
+    )
+)
+```
+
+<ParamField path="albedo_r" type="float" default="0.8">Red component of the diffuse/specular base color. Range `[0.0, 1.0]`.</ParamField>
+<ParamField path="albedo_g" type="float" default="0.8">Green component of the base color.</ParamField>
+<ParamField path="albedo_b" type="float" default="0.8">Blue component of the base color.</ParamField>
+<ParamField path="roughness" type="float" default="0.5">PBR roughness. `0.0` = mirror-smooth, `1.0` = fully diffuse.</ParamField>
+<ParamField path="metallic" type="float" default="0.0">PBR metallic factor. `0.0` = dielectric (non-metal), `1.0` = conductor.</ParamField>
+<ParamField path="emissive_r" type="float" default="0.0">Red self-emission added to the final color. Values above `1.0` produce HDR-like glow.</ParamField>
+<ParamField path="emissive_g" type="float" default="0.0">Green self-emission.</ParamField>
+<ParamField path="emissive_b" type="float" default="0.0">Blue self-emission.</ParamField>
+
+---
+
+## Lighting
+
+Lighting data is provided through ECS components and world resources, not through global state. The 3D renderer collects them once per frame.
+
+### `DirectionalLight`
+
+Sun-style infinite light. The renderer reads the first `DirectionalLight` component found in the world; extras are ignored. If none exists, a default `DirectionalLight()` is used.
+
+```python
+import keel
+
+app.world.spawn(
+    keel.DirectionalLight(
+        dir_x=-0.5, dir_y=-1.0, dir_z=-0.3,
+        r=1.0, g=0.95, b=0.8,
+        intensity=1.2,
+    )
+)
+```
+
+<ParamField path="dir_x" type="float" default="-0.577">X component of the direction the light is *travelling* (not the source position). Normalized by the shader.</ParamField>
+<ParamField path="dir_y" type="float" default="-0.577">Y component.</ParamField>
+<ParamField path="dir_z" type="float" default="-0.577">Z component.</ParamField>
+<ParamField path="r" type="float" default="1.0">Red channel of the light color.</ParamField>
+<ParamField path="g" type="float" default="1.0">Green channel.</ParamField>
+<ParamField path="b" type="float" default="1.0">Blue channel.</ParamField>
+<ParamField path="intensity" type="float" default="1.0">Multiplier applied to the light color before shading.</ParamField>
+
+### `PointLight`
+
+Positional light whose location comes from a co-located `Transform3D` on the same entity. Up to 8 point lights (`MAX_POINT_LIGHTS = 8`) are uploaded per frame, sorted nearest-camera-first. Excess lights are silently dropped.
+
+```python
+import keel
+
+app.world.spawn(
+    keel.Transform3D(x=2.0, y=3.0, z=-1.0),
+    keel.PointLight(r=1.0, g=0.4, b=0.1, intensity=5.0, radius=10.0),
+)
+```
+
+<ParamField path="r" type="float" default="1.0">Red channel of the light color.</ParamField>
+<ParamField path="g" type="float" default="1.0">Green channel.</ParamField>
+<ParamField path="b" type="float" default="1.0">Blue channel.</ParamField>
+<ParamField path="intensity" type="float" default="1.0">Multiplier on the light color.</ParamField>
+<ParamField path="radius" type="float" default="10.0">Effective falloff radius in world units. Beyond this distance the contribution fades to zero.</ParamField>
+
+### `AmbientLight`
+
+`AmbientLight` is a **world resource**, not an ECS component. Insert it once; the renderer reads it each frame. If absent, a default `(0.1, 0.1, 0.1)` ambient term is used.
+
+```python
+from keel.renderer3d import AmbientLight
+
+app.world.insert_resource(AmbientLight(r=0.15, g=0.15, b=0.2))
+```
+
+<ParamField path="r" type="float" default="0.1">Red ambient contribution added to every fragment.</ParamField>
+<ParamField path="g" type="float" default="0.1">Green ambient contribution.</ParamField>
+<ParamField path="b" type="float" default="0.1">Blue ambient contribution.</ParamField>

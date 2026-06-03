@@ -1,0 +1,81 @@
+---
+title: "AudioSource Component for Entity-Bound Sounds"
+sidebarTitle: "Audio"
+description: "AudioSource is an ECS component that binds a sound to an entity. Spawn it alongside Transform2D for positional audio or use it as a marker for entity-specific sounds."
+---
+
+`AudioSource` is an optional ECS component that ties a sound's logical lifecycle to a specific entity. Most games don't need it — calling `keel.play_sound(app, path)` directly from a gameplay system is simpler and covers the majority of one-shot and background-music use cases. `AudioSource` exists for scenarios where a sound's *existence* should mirror an entity's existence: a pickup that plays on collect, a character voice that must stop when the character despawns, or a positional emitter that will gain distance attenuation in v0.2.
+
+<Note>
+  Spatial / positional audio (distance attenuation, Doppler, a listener component) is planned for v0.2. In v0.1 all sounds play at a flat global volume regardless of `Transform2D` position.
+</Note>
+
+---
+
+## Usage
+
+```python
+import keel
+
+app = keel.App()
+keel.setup_renderer_2d(app)
+keel.setup_audio(app)
+
+# Spawn a coin pickup with an AudioSource
+# sound_id is a user-managed index into your own sound-path table
+coin = app.world.spawn(
+    keel.Transform2D(x=300.0, y=200.0),
+    keel.Sprite(texture_id=coin_tex_id, width=16.0, height=16.0),
+    keel.AudioSource(sound_id=0, volume=0.8, auto_play=False),
+)
+
+# In a collection system, trigger the sound and destroy the entity
+@app.system(keel.Phase.UPDATE)
+def collect_coins(world, dt):
+    for event in world.read_events(keel.CollisionEvent2D):
+        if event.entity_b == player_id:
+            keel.play_sound(app, "assets/coin.wav", volume=0.8)
+            world.despawn(event.entity_a)
+```
+
+---
+
+## Fields
+
+<ParamField path="sound_id" type="int" default="0">
+  An index into a user-maintained sound path registry. Keel does not maintain a global sound ID table — this field is a marker for your own lookup logic. The `AudioEngine` does not read `sound_id` automatically; your systems must map it to a file path before calling `play_sound`.
+</ParamField>
+
+<ParamField path="volume" type="float" default="1.0">
+  Intended playback volume for this source, in the range `[0.0, 1.0]`. Read by your systems to pass as the `volume` argument to `keel.play_sound`. Not automatically enforced by the engine.
+</ParamField>
+
+<ParamField path="loop" type="bool" default="False">
+  Whether the sound should loop. Pass this to `keel.play_sound(app, path, loop=source.loop)` in your system.
+</ParamField>
+
+<ParamField path="auto_play" type="bool" default="False">
+  A flag your systems can check on the first frame after spawn to decide whether to start playback immediately. The engine does not observe this field automatically.
+</ParamField>
+
+<ParamField path="playing" type="bool" default="False">
+  A flag your systems can set to `True` once playback has been initiated and back to `False` when the `SoundHandle` reports the sound has finished. Useful for preventing duplicate play calls.
+</ParamField>
+
+---
+
+## Design note
+
+The fields above are all declarative markers — `AudioSource` has no behavior of its own. The `AudioEngine` is driven entirely through module-level functions (`play_sound`, `play_music`, `stop_sound`, `set_volume`). `AudioSource` simply co-locates intent with the entity so your systems can query for it and react:
+
+```python
+@app.system(keel.Phase.UPDATE)
+def auto_play_sources(world, dt):
+    for (sources,) in world.query(keel.AudioSource):
+        for i in range(len(sources)):
+            if sources["auto_play"][i] and not sources["playing"][i]:
+                # Map sound_id to a path using your registry
+                path = MY_SOUND_PATHS[int(sources["sound_id"][i])]
+                keel.play_sound(app, path, volume=float(sources["volume"][i]))
+                sources["playing"][i] = True
+```

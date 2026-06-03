@@ -1,0 +1,140 @@
+---
+title: "Transform2D and Transform3D Components"
+sidebarTitle: "Transform"
+description: "Transform2D positions 2D entities with x, y, rotation, and scale. Transform3D positions 3D entities with xyz position, xyz rotation, xyz scale, and an optional parent chain."
+---
+
+Every entity that lives in the game world needs a position. `Transform2D` and `Transform3D` are the ECS components that provide it. The 2D renderer, physics bridge, and text system all read from these components directly — you never call a setter method, you simply write to the fields and the engine picks them up on the next tick.
+
+Both components are registered with the `@component` decorator, meaning they are stored as structured NumPy arrays in the world's archetypes. You interact with them through `world.spawn(...)`, `world.set(...)`, and archetype queries.
+
+---
+
+## Transform2D
+
+`Transform2D` represents a world-space 2D pose. Position is in pixels (the default camera maps pixels 1-to-1 to screen coordinates at zoom 1.0). Rotation is measured in radians, counterclockwise. Scale multiplies both the entity's own dimensions (e.g. `Sprite.width`) and any child transforms downstream.
+
+```python
+import keel
+
+app = keel.App()
+
+player = app.world.spawn(
+    keel.Transform2D(x=400.0, y=300.0, rotation=0.0, scale_x=1.0, scale_y=1.0),
+    keel.Sprite(texture_id=0, width=64.0, height=64.0),
+)
+```
+
+### Fields
+
+<ParamField path="x" type="float" default="0.0">
+  World-space X position in pixels. Positive X points right.
+</ParamField>
+
+<ParamField path="y" type="float" default="0.0">
+  World-space Y position in pixels. Positive Y points up in world space. The default camera places (0, 0) at the bottom-left of the window.
+</ParamField>
+
+<ParamField path="rotation" type="float" default="0.0">
+  Rotation in radians, counterclockwise from the positive X axis. The 2D renderer and physics bridge both read this field. Use `math.radians()` to convert from degrees.
+</ParamField>
+
+<ParamField path="scale_x" type="float" default="1.0">
+  Horizontal scale multiplier. Multiplied against `Sprite.width` (or any width field) when the entity is drawn. A value of `2.0` doubles the apparent width.
+</ParamField>
+
+<ParamField path="scale_y" type="float" default="1.0">
+  Vertical scale multiplier. Multiplied against `Sprite.height`. A value of `0.5` halves the apparent height.
+</ParamField>
+
+---
+
+## Transform3D
+
+`Transform3D` represents a world-space 3D pose using Euler angles. Rotations are applied in **YXZ order** (yaw → pitch → roll in camera terms), stored per-axis as `rot_x`, `rot_y`, `rot_z`. A `parent` field enables a lightweight scene-hierarchy — set it to the entity ID of the parent entity; `0` means no parent (root).
+
+```python
+import keel
+
+app = keel.App()
+
+# Spawn a box at world origin, slightly rotated
+cube_entity = app.world.spawn(
+    keel.Transform3D(
+        x=0.0, y=0.0, z=-5.0,
+        rot_x=0.0, rot_y=0.785, rot_z=0.0,  # 45° yaw
+        scale_x=1.0, scale_y=1.0, scale_z=1.0,
+    ),
+    keel.MeshRenderer(mesh_id=cube_mesh_id, material_id=mat_id),
+)
+
+# Child entity parented to the cube
+child_entity = app.world.spawn(
+    keel.Transform3D(x=2.0, y=0.0, z=0.0, parent=cube_entity),
+)
+```
+
+<Note>
+  The 3D renderer calls `resolve_world_matrix(entity_id, world)` each frame to walk the parent chain and compose the final model matrix. Deep hierarchies add per-frame parent lookups; keep chains shallow for performance.
+</Note>
+
+### Fields
+
+<ParamField path="x" type="float" default="0.0">
+  World-space X position (or local X when `parent` is non-zero).
+</ParamField>
+
+<ParamField path="y" type="float" default="0.0">
+  World-space Y position. Positive Y is up in Keel's right-handed coordinate system.
+</ParamField>
+
+<ParamField path="z" type="float" default="0.0">
+  World-space Z position. Negative Z points into the screen in a right-handed system (camera looks toward −Z by default).
+</ParamField>
+
+<ParamField path="rot_x" type="float" default="0.0">
+  Rotation around the X axis (pitch) in radians. Applied second in the YXZ Euler decomposition.
+</ParamField>
+
+<ParamField path="rot_y" type="float" default="0.0">
+  Rotation around the Y axis (yaw) in radians. Applied first in the YXZ Euler decomposition.
+</ParamField>
+
+<ParamField path="rot_z" type="float" default="0.0">
+  Rotation around the Z axis (roll) in radians. Applied third in the YXZ Euler decomposition.
+</ParamField>
+
+<ParamField path="scale_x" type="float" default="1.0">
+  Scale multiplier along the X axis. Combined with parent scale when the world matrix is resolved.
+</ParamField>
+
+<ParamField path="scale_y" type="float" default="1.0">
+  Scale multiplier along the Y axis.
+</ParamField>
+
+<ParamField path="scale_z" type="float" default="1.0">
+  Scale multiplier along the Z axis.
+</ParamField>
+
+<ParamField path="parent" type="int" default="0">
+  Entity ID of this transform's parent. `0` means root (no parent). When non-zero, the 3D renderer walks the chain and multiplies parent model matrices together before drawing this entity. The pybullet bridge always uses world-space position/rotation directly and ignores this field.
+</ParamField>
+
+---
+
+## Updating transforms at runtime
+
+Both components live in NumPy structured arrays. The idiomatic way to move an entity is to write directly to the column in a system:
+
+```python
+@app.system(keel.Phase.UPDATE)
+def move_player(world, dt, input: keel.InputState):
+    speed = 200.0
+    for transforms, in world.query(keel.Transform2D):
+        if input.is_key_down(keel.KEY_RIGHT):
+            transforms["x"] += speed * dt
+        if input.is_key_down(keel.KEY_LEFT):
+            transforms["x"] -= speed * dt
+```
+
+For one-off moves from outside a system you can use `world.set(entity_id, Transform2D, x=100.0)`.
